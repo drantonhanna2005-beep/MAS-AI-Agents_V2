@@ -19,11 +19,16 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertFalse(config._is_configured_secret(""))
         self.assertTrue(config._is_configured_secret("actual-secret-value"))
 
-    def test_environment_key_and_provider_are_applied_without_exposing_them(self):
+    def test_environment_key_and_provider_are_applied(self):
         with patch.dict(os.environ, {"GROQ_API_KEY": "actual-secret-value", "MAS_PROVIDER": "groq"}, clear=False):
-            cfg = config._apply_runtime_config_for_test()
+            cfg = config._apply_runtime_config_for_test(dotenv={})
         self.assertEqual(cfg["provider"], "groq")
         self.assertEqual(cfg["api_keys"]["groq"], "actual-secret-value")
+
+    def test_placeholder_keys_are_not_reported_as_configured(self):
+        with patch.dict(os.environ, {"GROQ_API_KEY": "your_groq_api_key_here"}, clear=False):
+            cfg = config._apply_runtime_config_for_test(dotenv={})
+        self.assertEqual(cfg["api_keys"]["groq"], "")
 
 
 if __name__ == "__main__":
