@@ -440,12 +440,23 @@ def search(query: str, k: int = 6, min_score: float = 0.12) -> list[dict]:
         qv = _embed_query(query)
         if qv:
             sem = _norm([_cosine(qv, vec) if vec else 0.0 for vec in vectors[:len(docs)]])
+    # Filename/extension matching: «ملف Python» should find .py files even when
+    # the body never contains the word "Python" (keyword-only fallback).
+    ext_alias = {"python": "py", "word": "docx", "excel": "xlsx", "spreadsheet": "xlsx",
+                 "powerpoint": "pptx", "slides": "pptx", "text": "txt", "markdown": "md",
+                 "javascript": "js", "code": "py", "csv": "csv", "pdf": "pdf"}
+    source_tok: list[set] = _state.get("source_tok") or []
+    if not source_tok:
+        source_tok = [set(tokenize(f"{d.get('source','')} {d.get('title','')}")) for d in docs]
     combined: list[tuple[float, int]] = []
     title_tok: list[set] = _state.get("title_tok") or [set() for _ in docs]
     q_set = set(q)
     for i in range(len(docs)):
         title_bonus = 0.22 * min(1.0, sum(1 for t in q_set if t in title_tok[i]) / 2)
-        s = 0.62 * kw[i] + (0.38 * sem[i] if sem else 0.0) + title_bonus
+        src_hits = sum(1 for t in q_set
+                       if t in source_tok[i] or (ext_alias.get(t) and ext_alias[t] in source_tok[i]))
+        source_bonus = 0.26 * min(1.0, src_hits / 2)
+        s = 0.62 * kw[i] + (0.38 * sem[i] if sem else 0.0) + title_bonus + source_bonus
         combined.append((s, i))
     combined.sort(reverse=True)
     out: list[dict] = []
@@ -477,4 +488,28 @@ def build_context(query: str, k: int = 6) -> tuple[str, list[dict]]:
         if h["source"].startswith("http"):
             src["url"] = h["source"]
         sources.append(src)
+    return "\n\n".join(lines), sources
+
+
+def build_university_context(query: str, k: int = 6) -> tuple[str, list[dict]]:
+    """يبني بلوك سياق من ملفات الجامعة المرفوعة (المادة الخاصة بالطالب) بنفس صيغة [S1]..[Sn].
+    يُستدعى من المنسّق عند الحاجة لاسترجاع محتوى المواد الدراسية الفعلية.
+    """
+    from . import university_ingest as ui
+    hits = ui.search_university(query, k=k)
+    if not hits:
+        return "", []
+    lines = ["=== مقاطع من موادك الدراسية (جامعة سفنكس — المستوى الثالث الترم الأول) (استند إليها واستشهد برقمها) ==="]
+    sources: list[dict] = []
+    for i, h in enumerate(hits, 1):
+        md = h.get("metadata") or {}
+        # بادئة U لتجنب التصادم مع ترقيم S1..Sn الخاص بفهرس RAG العام.
+        ref = f"U{i}"
+        lines.append(f"[{ref}] (المصدر: {h.get('title','')} — {md.get('source_rel','')})\n{h.get('text','')}")
+        sources.append({
+            "ref": ref,
+            "title": h.get("title", ""),
+            "source": h.get("source", ""),
+            "metadata": md,
+        })
     return "\n\n".join(lines), sources

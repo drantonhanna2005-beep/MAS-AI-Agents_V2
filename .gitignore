@@ -46,3 +46,16 @@ _*
 Thumbs.db
 .vscode/
 .idea/
+
+# University knowledge ingestion artifacts (local, private, large)
+_inventory_university.jsonl
+_university_*/
+data/university/
+index_store/university_*
+artifacts/university/
+models/university/
+eval/university/
+*.ckpt
+*.safetensors
+*.pt
+*.bin

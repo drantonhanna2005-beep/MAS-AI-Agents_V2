@@ -43,7 +43,24 @@ def _pdf(path: Path) -> str:
             t = ""
         if t:
             parts.append(f"[صفحة {i}]\n{t}")
-    return "\n\n".join(parts)[:MAX_CHARS]
+    text = "\n\n".join(parts)[:MAX_CHARS]
+    if text.strip():
+        return text
+    # Scanned/image-only PDF: pypdf returns nothing. Use Gemini OCR when a key exists.
+    try:
+        from .config import load_config, get_model_key
+        cfg = load_config()
+        model = ((cfg.get("stt") or {}).get("gemini_model")
+                 or (cfg.get("main_models") or {}).get("gemini") or "gemini-flash-lite-latest")
+        key = get_model_key("gemini", model, cfg)
+        if key:
+            from .llm import gemini_extract_document
+            ocr = gemini_extract_document(path.read_bytes(), "application/pdf", key, model)
+            if ocr.strip():
+                return f"[نص مستخرج بالـ OCR من ملف ممسوح]\n{ocr[:MAX_CHARS]}"
+    except Exception as e:
+        return f"[تعذر استخراج النص من {path.name}: {e}]"
+    return ""
 
 
 def _docx(path: Path) -> str:
@@ -81,15 +98,30 @@ def _pptx(path: Path) -> str:
 
 def _xlsx(path: Path) -> str:
     from openpyxl import load_workbook
-    wb = load_workbook(str(path), read_only=True, data_only=True)
+    # Keep formulas (they are lost with data_only=True) and cached values when present.
+    wb_f = load_workbook(str(path), read_only=True, data_only=False)
+    wb_v = load_workbook(str(path), read_only=True, data_only=True)
     parts: list[str] = []
-    for ws in wb.worksheets:
-        parts.append(f"[ورقة: {ws.title}]")
-        for row in ws.iter_rows(values_only=True):
-            cells = ["" if v is None else str(v).strip() for v in row]
-            if any(cells):
-                parts.append(" | ".join(cells))
-        parts.append("")
+    try:
+        for ws_f, ws_v in zip(wb_f.worksheets, wb_v.worksheets):
+            parts.append(f"[ورقة: {ws_f.title}]")
+            for row_f, row_v in zip(ws_f.iter_rows(values_only=True), ws_v.iter_rows(values_only=True)):
+                cells = []
+                for f, v in zip(row_f, row_v):
+                    if isinstance(f, str) and f.startswith("="):
+                        cells.append(f + (f" → {v}" if v is not None else ""))
+                    else:
+                        cells.append("" if v is None else str(v).strip())
+                if any(cells):
+                    parts.append(" | ".join(cells))
+            parts.append("")
+    finally:
+        # must close on Windows, otherwise the file handle blocks delete/replace
+        for wb in (wb_f, wb_v):
+            try:
+                wb.close()
+            except Exception:
+                pass
     return "\n".join(parts)[:MAX_CHARS]
 
 

@@ -27,13 +27,47 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from core import cvgen, extract, gpatool, history, knowledge, rag
-from core.config import DATA_DIR, ROOT, UPLOAD_DIR, load_config, resolve_provider, save_config
+from core import cvgen, extract, feedback, gpatool, history, knowledge, rag, university_ingest
+from core.config import (DATA_DIR, ROOT, UPLOAD_DIR, load_config, resolve_provider,
+                         save_config, get_fallback)
 from agents.orchestrator import run_stream
 from agents.registry import AGENTS, ORCHESTRATOR
 
 WEB_DIR = ROOT / "web"
 app = FastAPI(title="University AI MAS — فريق الوكلاء الأكاديمي", version="1.0.0")
+
+# ---------------------------------------------------------------- تشخيص منظم
+# سجل مختصر لكل طلب API: معرّف ارتباط + المسار + الحالة + الزمن.
+# لا نسجّل الأجسام أو المفاتيح أو محتوى المستخدم إطلاقاً.
+import logging
+import uuid as _uuid
+
+_log = logging.getLogger("mas")
+if not _log.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _log.addHandler(_h)
+    _log.setLevel(logging.INFO)
+
+
+@app.middleware("http")
+async def _request_logger(request: Request, call_next):
+    rid = _uuid.uuid4().hex[:12]
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001 — نُعيد الخطأ بعد تسجيله مع معرّف الارتباط
+        ms = (time.perf_counter() - started) * 1000
+        _log.error("rid=%s %s %s -> 500 (%.0fms) %s",
+                   rid, request.method, request.url.path, ms, type(exc).__name__)
+        raise
+    ms = (time.perf_counter() - started) * 1000
+    path = request.url.path
+    if path.startswith("/api/") or path.startswith("/share/"):
+        _log.info("rid=%s %s %s -> %s (%.0fms)",
+                  rid, request.method, path, response.status_code, ms)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
@@ -42,6 +76,15 @@ if WEB_DIR.exists():
 @app.get("/")
 def index():
     return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/sw.js")
+def service_worker():
+    """Service worker at the site root so its scope covers the whole app."""
+    resp = FileResponse(WEB_DIR / "sw.js", media_type="application/javascript")
+    resp.headers["Service-Worker-Allowed"] = "/"
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.get("/share/{sid}")
@@ -81,6 +124,14 @@ def health():
         "embed": rag._embed_engine()[0],
         "library": history.library_count(),
     }
+    fb = cfg.get("fallback") or {}
+    result["fallback"] = {
+        "enabled": bool(fb.get("enabled")),
+        "configured": get_fallback(cfg) is not None,
+        "provider": fb.get("provider") or "custom",
+        "model": fb.get("model") or "",
+        "base_url": fb.get("base_url") or "",
+    }
     # شفاء ذاتي: فهرس بدون vectors + محرك متاح → احسب الدلالي في الخلفية مرة واحدة لكل تشغيل
     try:
         idx = result["index"]
@@ -114,6 +165,9 @@ def links(lang: str = "ar"):
 def get_settings():
     cfg = load_config()
     masked = {**cfg, "api_keys": {k: ("•" * 8 if v else "") for k, v in cfg.get("api_keys", {}).items()}}
+    if isinstance(masked.get("fallback"), dict):
+        masked["fallback"] = {**masked["fallback"],
+                              "api_key": ("•" * 8 if masked["fallback"].get("api_key") else "")}
     return masked
 
 
@@ -131,8 +185,39 @@ def set_settings(body: dict):
                 cfg["api_keys"][k] = ""  # حذف صريح للمفتاح
             elif v and set(v) != {"•"}:  # لا نستبدل مفتاحاً محفوظاً بنقاط القناع
                 cfg["api_keys"][k] = v.strip()
+    if isinstance(body.get("fallback"), dict):
+        fb = {**(cfg.get("fallback") or {})}
+        for k in ("enabled", "provider", "base_url", "model"):
+            if k in body["fallback"]:
+                fb[k] = body["fallback"][k]
+        fk = body["fallback"].get("api_key")
+        if fk == "__clear__":
+            fb["api_key"] = ""
+        elif fk and set(fk) != {"•"}:
+            fb["api_key"] = fk.strip()
+        cfg["fallback"] = fb
     save_config(cfg)
     return health()
+
+
+@app.post("/api/fallback/test")
+def test_fallback():
+    """اختبار حقيقي للمزود الاحتياطي (بدون كشف المفتاح في الاستجابة)."""
+    cfg = load_config()
+    fb = get_fallback(cfg)
+    if not fb:
+        return {"ok": False, "error": "المزود الاحتياطي غير مكتمل: يحتاج enabled + api_key + model"
+                                      " + base_url (أو provider=openrouter مع مفتاح sk-or-)."}
+    from core.llm import complete
+    try:
+        _, content = complete(fb["provider"], fb["model"],
+                              [{"role": "user", "content": "Reply with exactly: OK"}],
+                              api_key=fb["key"], temperature=0.0,
+                              base_url=fb.get("base_url", ""))
+        return {"ok": True, "reply": (content or "").strip()[:200],
+                "provider": fb["provider"], "model": fb["model"]}
+    except Exception as e:  # noqa: BLE001 - نُعيد سبب الفشل الحقيقي للمستخدم
+        return {"ok": False, "error": str(e), "provider": fb["provider"], "model": fb["model"]}
 
 
 # ---------------------------------------------------------------- المحادثات والسجل
@@ -205,7 +290,8 @@ def create_share(cid: str, body: dict, request: Request):
     if not isinstance(ids, list):
         ids = []
     theme = str(body.get("theme") or "").strip().lower()
-    result = history.create_share(cid, ids, title=body.get("title"), theme=theme)
+    lang = str(body.get("lang") or "").strip().lower()[:2]
+    result = history.create_share(cid, ids, title=body.get("title"), theme=theme, lang=lang)
     if not result:
         return JSONResponse({"error": "No messages to share"}, status_code=400)
     base_url = str(request.base_url).rstrip("/")
@@ -218,6 +304,19 @@ def read_share(sid: str):
     if not data:
         return JSONResponse({"error": "الرابط غير صالح أو تم حذفه"}, status_code=404)
     return data
+
+
+@app.delete("/api/share/{sid}")
+def revoke_share(sid: str):
+    if not history.revoke_share_by_id(sid):
+        return JSONResponse({"error": "الرابط غير موجود"}, status_code=404)
+    return {"ok": True, "revoked": sid}
+
+
+@app.delete("/api/chats/{cid}/share")
+def revoke_chat_share(cid: str):
+    removed = history.revoke_share(cid)
+    return {"ok": True, "revoked": removed}
 
 
 @app.patch("/api/chats/{cid}/messages/{mid}/feedback")
@@ -421,8 +520,33 @@ def chat_stream(body: dict):
 
 
 # ---------------------------------------------------------------- الملفات والتدريب
+_reindex_wanted = threading.Event()
+_reindex_guard = threading.Lock()
+
+
 def _bg_reindex():
-    threading.Thread(target=rag.build_index, daemon=True).start()
+    """Queue a rebuild; never drop a request that arrives while a build is running."""
+    _reindex_wanted.set()
+    with _reindex_guard:
+        if getattr(_bg_reindex, "_running", False):
+            return
+        _bg_reindex._running = True
+
+    def worker():
+        try:
+            while _reindex_wanted.is_set():
+                _reindex_wanted.clear()
+                while rag.is_building():
+                    time.sleep(0.5)
+                rag.build_index()
+        finally:
+            with _reindex_guard:
+                _bg_reindex._running = False
+            # A request may have arrived between the loop check and clearing the flag.
+            if _reindex_wanted.is_set():
+                _bg_reindex()
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 @app.post("/api/upload")
@@ -448,6 +572,15 @@ def upload(file: UploadFile = File(...), train: bool = Form(False), chat_id: str
     if train:
         train_dir = DATA_DIR / "من_الشات"
         train_dir.mkdir(parents=True, exist_ok=True)
+        # Re-uploading a file with the same original name updates it instead of
+        # leaving the old timestamped copy in the index (stale/duplicate facts).
+        original_name = Path(file.filename or safe).name
+        for old in list(train_dir.iterdir()):
+            try:
+                if old.is_file() and old.name != safe and old.name.endswith("_" + original_name):
+                    old.unlink()
+            except Exception:
+                pass
         target = train_dir / safe
         target.write_bytes(dest.read_bytes())
         saved_to = str(target.relative_to(DATA_DIR))
@@ -502,13 +635,18 @@ def library_delete(lid: str):
     item = history.delete_library_item(lid)
     if not item:
         return JSONResponse({"error": "الملف غير موجود"}, status_code=404)
-    path = (UPLOAD_DIR / item["stored_name"]).resolve()
-    try:
-        if path.is_relative_to(UPLOAD_DIR.resolve()) and path.is_file():
-            path.unlink()
-    except Exception:
-        pass
-    return {"ok": True}
+    removed_train = False
+    for folder in (UPLOAD_DIR, DATA_DIR / "من_الشات"):
+        path = (folder / item["stored_name"]).resolve()
+        try:
+            if path.is_relative_to(folder.resolve()) and path.is_file():
+                path.unlink()
+                removed_train = removed_train or folder != UPLOAD_DIR
+        except Exception:
+            pass
+    if removed_train:
+        _bg_reindex()   # remove the deleted document's chunks from retrieval
+    return {"ok": True, "reindexing": removed_train}
 
 
 @app.post("/api/library/link")
@@ -517,6 +655,77 @@ def library_link(body: dict):
                          body.get("message_id"))
     return {"ok": True}
 
+
+# ---------------------------------------------------------------- مصدر الجامعة (الاستهلاك 읽-only)
+@app.get("/api/university/status")
+def university_status():
+    """إحصائيات معالجة دليل الجامعة المصدر (للواجهة فقط؛ لا يُعدّل أي ملف مصدر)."""
+    return university_ingest.get_status()
+
+
+@app.post("/api/university/reindex")
+def university_reindex():
+    """إعادة معالجة دليل الجامعة بشكل تزايدية (آمن، يُحفظ الملفات المصدرية)."""
+    if getattr(university_reindex, "_running", False):
+        return {"started": False, "busy": True}
+    university_reindex._running = True
+    try:
+        status = university_ingest.process_university()
+        return {"started": True, "status": status}
+    finally:
+        university_reindex._running = False
+
+
+# ---------------------------------------------------------------- التغذية الراجعة والاختبارات الانحدارية
+@app.post("/api/feedback")
+def api_feedback(body: dict):
+    """يسجّل تغذية راجعة على إجابة وكيل. لو كان dislike ومؤكّد يُسجّل كحالة انحدار."""
+    fid = feedback.record_feedback(
+        chat_id=str(body.get("chat_id") or ""),
+        message_id=int(body.get("message_id") or 0),
+        question=str(body.get("question") or ""),
+        agent=str(body.get("agent") or "research"),
+        answer=str(body.get("answer") or ""),
+        sources=body.get("sources") or [],
+        feedback=str(body.get("feedback") or ""),
+        category=body.get("category"),
+        root_cause=body.get("root_cause"),
+        confirmed=bool(body.get("confirmed", False)),
+    )
+    return {"ok": True, "feedback_id": fid}
+
+
+@app.get("/api/feedback/stats")
+def api_feedback_stats():
+    return feedback.get_stats()
+
+
+@app.get("/api/feedback/regression-cases")
+def api_regression_cases():
+    return {"cases": feedback.list_regression_cases()}
+
+
+@app.post("/api/feedback/regression-run")
+def api_regression_run(body: dict):
+    """يُعيد تشغيل حالة انحدار (أو جميع الحالات لو لم يُمرّر case_id).
+    يستخدم الدالة الفعلية لتشغيل الوكيل عبر /api/chat/stream غير متزامن؛ هنا ن錄 المحاولة فقط.
+    """
+    case_id = body.get("case_id")
+    cases = feedback.list_regression_cases()
+    if case_id:
+        cases = [c for c in cases if c.get("id") == case_id]
+    results = []
+    # لا يوجد Runner فعّال هنا (يتطلب SSE); نُسجّل المحاولة كنتيجة غير محسومة pending.
+    for c in cases:
+        results.append({
+            "case_id": c.get("id"),
+            "question": c.get("question"),
+            "category": c.get("category"),
+            "root_cause": c.get("root_cause"),
+            "status": "pending_sse_runner",
+            "note": "يُنفّذ عبر واجهة المتصفح/E2E ويُسجّل نتيجته في regression_runs.",
+        })
+    return {"run_count": len(results), "results": results}
 
 
 # ---------------------------------------------------------------- الأدوات

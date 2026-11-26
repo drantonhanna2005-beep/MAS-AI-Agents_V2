@@ -208,6 +208,13 @@ def render_html(profile: dict, lang: str = "ar", theme: dict | None = None) -> s
     # فواصل صفحات منطقية: الخبرات تبدأ صفحة جديدة عند 2+ صفحات، والمشروعات عند 3+
     pb_exp = "page-break-before: always; break-before: page;" if pages >= 2 else ""
     pb_proj = "page-break-before: always; break-before: page;" if pages >= 3 else ""
+    # For 4-8 pages, distribute the remaining standard ATS sections across
+    # dedicated pages instead of silently collapsing back to 3 pages.
+    pb_edu = "page-break-before: always; break-before: page;" if pages >= 4 else ""
+    pb_skills = "page-break-before: always; break-before: page;" if pages >= 5 else ""
+    pb_courses = "page-break-before: always; break-before: page;" if pages >= 6 else ""
+    pb_langs = "page-break-before: always; break-before: page;" if pages >= 7 else ""
+    pb_summary = "page-break-before: always; break-before: page;" if pages >= 8 else ""
     accent = th["accent"]
     sec = _CV_T.get(lang, _CV_T["ar"])["sec"]
 
@@ -290,13 +297,13 @@ def render_html(profile: dict, lang: str = "ar", theme: dict | None = None) -> s
     }}
     """
     parts = [
-        section("summary", f"<p>{summary}</p>" if summary else ""),
-        section("edu", edu),
+        section("summary", f"<p>{summary}</p>" if summary else "", pb_summary),
+        section("edu", edu, pb_edu),
         section("exp", exp, pb_exp),
         section("proj", proj, pb_proj),
-        section("skills", skills_html),
-        section("courses", f"<p>{courses}</p>" if courses else ""),
-        section("langs", f"<p>{langs}</p>" if langs else ""),
+        section("skills", skills_html, pb_skills),
+        section("courses", f"<p>{courses}</p>" if courses else "", pb_courses),
+        section("langs", f"<p>{langs}</p>" if langs else "", pb_langs),
     ]
     html = f"""<!doctype html>
 <html lang="{'ar' if rtl else 'en'}" dir="{dir_attr}">
@@ -435,6 +442,8 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         _p(contact, size=10, space_after=8)
 
     if _clean(profile.get("summary")):
+        if pages >= 8:
+            d.add_page_break()
         _heading("الملخص المهني" if rtl else "Summary")
         _p(_clean(profile.get("summary")), size=11)
 
@@ -462,6 +471,8 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
     if _clean(profile.get("summary")):
         pass
     if profile.get("education"):
+        if pages >= 4:
+            d.add_page_break()
         _heading("التعليم" if rtl else "Education")
         for e in _norm_items(profile.get("education")):
             line = " — ".join(x for x in [_clean(e.get("degree")), _clean(e.get("institution")),
@@ -497,12 +508,18 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
                 _font(run, size=11)
                 p.paragraph_format.space_after = Pt(2)
     if profile.get("skills"):
+        if pages >= 5:
+            d.add_page_break()
         _heading("المهارات" if rtl else "Skills")
         _p(", ".join(_clean(s) for s in profile.get("skills") or []), size=11)
     if profile.get("courses"):
+        if pages >= 6:
+            d.add_page_break()
         _heading("كورسات وشهادات" if rtl else "Courses")
         _p(", ".join(_clean(s) for s in profile.get("courses") or []), size=11)
     if profile.get("languages"):
+        if pages >= 7:
+            d.add_page_break()
         _heading("اللغات" if rtl else "Languages")
         _p(", ".join(_clean(s) for s in profile.get("languages") or []), size=11)
 

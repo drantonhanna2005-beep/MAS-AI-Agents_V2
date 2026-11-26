@@ -161,7 +161,7 @@ img { max-width: 100%; }
   z-index: 25; animation: fadeIn .2s ease; }
 
 /* ============================== التوب بار ============================== */
-#main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
 #topbar {
   display: flex; align-items: center; gap: 10px; padding: 9px 14px; min-height: 64px;
   border-bottom: 1px solid var(--line);
@@ -197,7 +197,10 @@ img { max-width: 100%; }
 .badge.warn { background: rgba(230,162,60,.15); color: var(--warn); }
 
 /* ============================== الشات ============================== */
-#chatScroll { flex: 1; overflow-y: auto; scroll-behavior: smooth; overscroll-behavior: contain; position: relative; }
+/* حاوية التمرير الرئيسية: عمودي + أفقي صريحان، مع min:0 لكل اتجاه حتى يعمل التمرير
+   من أعلى/أسفل/يمين/يسار عند أي تكبير أو تغيير حجم للنافذة */
+#chatScroll { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: auto;
+  scroll-behavior: smooth; overscroll-behavior: contain; position: relative; }
 #welcome { max-width: 900px; margin: 0 auto; padding: 50px 22px 30px; text-align: center; }
 .hero-logo { width: 86px; height: 86px; margin-bottom: 6px; filter: drop-shadow(0 14px 30px rgba(79,140,255,.22));
   animation: floaty 6s ease-in-out infinite; }
@@ -240,6 +243,9 @@ img { max-width: 100%; }
 .msg-att { border:1px solid rgba(255,255,255,.22); background: rgba(255,255,255,.08); border-radius:12px; overflow:hidden; max-width:100%; }
 .msg-att.img { width:min(280px,100%); }
 .msg-att.img .att-thumb { display:block; width:100%; height:180px; object-fit:cover; cursor:zoom-in; background:#0b1220; }
+.msg-att.media { width:min(360px,100%); }
+.msg-att.media video { display:block; width:100%; max-height:260px; background:#000; }
+.msg-att.media audio { display:block; width:100%; padding:8px; }
 .msg-att-bar, .msg-att.file { display:flex; align-items:center; gap:8px; padding:8px 10px; min-width:0; }
 .msg-att-bar span, .att-file-meta b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; min-width:0; flex:1; }
 .att-dl { width:28px; height:28px; display:grid; place-items:center; border-radius:8px; color:inherit; flex:0 0 auto; text-decoration:none; }
@@ -263,6 +269,7 @@ img { max-width: 100%; }
 .msg .body blockquote { border-inline-start: 3px solid var(--accent); background: var(--accent-soft);
   padding: 9px 14px; border-radius: 9px; margin: 9px 0; color: var(--txt2); overflow-wrap:anywhere; }
 .msg .body pre { background: #0a0f18; color: #d7e2f2; padding: 15px; border-radius: 13px; overflow-x: auto;
+  max-width: 100%; min-width: 0;
   direction: ltr; text-align: left; margin: 11px 0; font-size: 12.5px; border: 1px solid #1c2738; max-width:100%; }
 .msg .body code { font-family: Consolas, monospace; background: var(--bg3); padding: 1px 6px; border-radius: 6px; font-size: .92em; direction:ltr; unicode-bidi:embed; }
 .msg .body pre code { background: none; padding: 0; white-space:pre; }
@@ -397,15 +404,17 @@ body.share-mode #convNav { opacity: .25; pointer-events: none; }
 .overlay { position: fixed; inset: 0; background: rgba(4, 8, 15, .64); backdrop-filter: blur(5px);
   display: grid; place-items: center; z-index: 80; animation: fadeIn .18s ease; padding: 18px; }
 .modal { background: var(--bg2); border: 1px solid var(--line2); border-radius: 20px; width: min(720px, 100%);
-  max-height: 88vh; display: flex; flex-direction: column; box-shadow: var(--shadow);
-  animation: modalIn .22s cubic-bezier(.2,.8,.2,1); }
+  max-height: 88vh; max-height: 88dvh; display: flex; flex-direction: column; box-shadow: var(--shadow);
+  animation: modalIn .22s cubic-bezier(.2,.8,.2,1); min-width: 0; }
 @keyframes modalIn { from { opacity: 0; transform: translateY(12px) scale(.99); } to { opacity: 1; transform: none; } }
 .modal.wide { width: min(980px, 100%); }
 .modal-head { display: flex; align-items: center; gap: 10px; padding: 15px 20px; border-bottom: 1px solid var(--line); }
 .modal-head b { font-size: 16px; } .modal-head .x { margin-inline-start: auto; width: 32px; height: 32px;
   display: grid; place-items: center; color: var(--txt2); border-radius: 9px; }
 .modal-head .x:hover { background: var(--bg3); color: var(--txt); }
-.modal-body { padding: 18px 20px; overflow-y: auto; font-size: 13.5px; line-height: 1.8; }
+/* min-height:0 إلزامي هنا — بدونها يتمدد جسم النافذة بدل التمرير ويصبح
+   محتواها السفلي (زر الحفظ مثلًا) خارج الشاشة عند التكبير */
+.modal-body { padding: 18px 20px; min-height: 0; overflow-y: auto; overflow-x: auto; font-size: 13.5px; line-height: 1.8; }
 .modal-foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-start; flex-wrap: wrap; }
 .btn { padding: 9px 16px; border-radius: 10px; font-weight: 700; font-size: 12.5px; background: var(--bg3);
   transition: filter .15s, background .15s, transform .15s; display: inline-flex; align-items: center; gap: 6px; }
@@ -639,12 +648,70 @@ html[data-theme="light"] .cb-btn.ok{color:#15803d}
 .codeblock .cb-pre{margin:0;padding:14px 16px;overflow:auto;max-width:100%;background:#0b1220;color:#dbe6f5;font-size:.86rem;line-height:1.6;tab-size:4}
 html[data-theme="light"] .codeblock .cb-pre{background:#0f1726;color:#e2e8f0}
 .codeblock .cb-pre code{font-family:Consolas,"Cascadia Code","JetBrains Mono",Menlo,monospace;white-space:pre;background:none;padding:0;border:0;color:inherit;direction:ltr;unicode-bidi:embed;display:block;min-width:max-content}
-.cb-pre-full{max-height:calc(100vh - 130px);font-size:.92rem}
+/* تظليل صيغة خفيف (بدون مكتبات خارجية) */
+.cb-code .tok-k{color:#c084fc;font-weight:600}
+.cb-code .tok-s{color:#86efac}
+.cb-code .tok-n{color:#fbbf24}
+.cb-code .tok-c{color:#94a3b8;font-style:italic}
+.cb-code .tok-t{color:#67e8f9}
+.code-block code .tok-k, .code-full-card code .tok-k{color:#c084fc;font-weight:600}
+.code-block code .tok-s, .code-full-card code .tok-s{color:#86efac}
+.code-block code .tok-n, .code-full-card code .tok-n{color:#fbbf24}
+.code-block code .tok-c, .code-full-card code .tok-c{color:#94a3b8;font-style:italic}
+.code-block code .tok-t, .code-full-card code .tok-t{color:#67e8f9}
+.cb-pre-full{max-height:calc(100vh - 130px);max-height:calc(100dvh - 130px);font-size:.92rem}
 .cb-modal{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.62);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:22px;animation:cbFade .16s ease-out}
-.cb-modal-card{width:min(1100px,100%);max-height:calc(100vh - 44px);display:flex;flex-direction:column;border-radius:16px;overflow:hidden;border:1px solid var(--bd);background:var(--card);box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.cb-modal-card{width:min(1100px,100%);max-height:calc(100vh - 44px);max-height:calc(100dvh - 44px);display:flex;flex-direction:column;border-radius:16px;overflow:hidden;border:1px solid var(--bd);background:var(--card);box-shadow:0 24px 60px rgba(0,0,0,.45)}
 .cb-modal-card .cb-pre{flex:1;min-height:0}
 @keyframes cbFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .msg .body pre.cb-pre{background:#0b1220;color:#dbe6f5;padding:14px 16px;border-radius:0}
 html[data-theme="light"] .msg .body pre.cb-pre{background:#0f1726;color:#e2e8f0}
 .msg .body .codeblock{max-width:100%;overflow-x:auto}
 
+/* ---------------- PWA install banner ---------------- */
+.pwa-banner{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:1100;display:flex;align-items:center;gap:12px;
+  width:min(680px,calc(100vw - 24px));padding:10px 12px;border:1px solid var(--bd);border-radius:16px;
+  background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(12px);
+  box-shadow:0 14px 40px rgba(0,0,0,.35);animation:pwaIn .22s ease-out}
+.pwa-banner .pwa-ico{width:38px;height:38px;border-radius:10px;flex:0 0 auto;object-fit:cover}
+.pwa-txt{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.pwa-txt b{font-size:.92rem;color:var(--fg)}
+.pwa-txt small{font-size:.76rem;color:var(--muted);line-height:1.35}
+.pwa-install{border:0;border-radius:10px;padding:8px 14px;font-weight:700;font-size:.85rem;cursor:pointer;
+  background:var(--accent);color:#fff;white-space:nowrap}
+.pwa-install:hover{filter:brightness(1.08)}
+.pwa-close{border:1px solid var(--bd);background:transparent;color:var(--fg);width:30px;height:30px;border-radius:9px;
+  cursor:pointer;font-size:14px;line-height:1;flex:0 0 auto}
+@keyframes pwaIn{from{opacity:0;transform:translate(-50%,-10px)}to{opacity:1;transform:translate(-50%,0)}}
+@media (max-width:560px){.pwa-banner{top:6px;gap:9px;padding:9px}.pwa-txt small{display:none}}
+
+
+
+/* GPA helper states */
+.gpa-hint{color:var(--txt2);font-size:11.5px;margin:-2px 0 8px}
+.gpa-result.gpa-error{background:color-mix(in srgb, #ef4444 14%, transparent);color:#fca5a5;font-size:13px}
+.btn.loading{opacity:.65;pointer-events:none}
+
+/* ====================== إصلاح التمرير عند التكبير + السحب والإفلات ====================== */
+/* منع أي عنصر داخل النوافذ من كسر العرض عند التكبير الشديد */
+.modal-body input, .modal-body textarea, .modal-body select { max-width: 100%; }
+.modal-body .grid2 { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
+.msg .body img { max-width: 100%; height: auto; }
+/* أشرطة تمرير واضحة في الاتجاهين داخل منطقة الشات */
+#chatScroll::-webkit-scrollbar:horizontal { height: 11px; }
+#chatScroll::-webkit-scrollbar-thumb:horizontal { background: var(--line2); border-radius: 6px; }
+#chatScroll::-webkit-scrollbar-thumb:horizontal:hover { background: var(--txt3); }
+
+/* طبقة إفلات الملفات — تظهر عند سحب أي ملف من أي نوع فوق أي مكان في الصفحة */
+#dropOverlay { position: fixed; inset: 0; z-index: 400; pointer-events: none;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--accent) 14%, rgba(6, 10, 18, .55));
+  backdrop-filter: blur(3px); animation: fadeIn .14s ease; }
+#dropOverlay[hidden] { display: none; }
+#dropOverlay .drop-box { padding: 34px 46px; border-radius: 22px; text-align: center;
+  border: 2.5px dashed color-mix(in srgb, var(--accent) 75%, var(--line2));
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  box-shadow: var(--shadow); color: var(--txt); }
+#dropOverlay .drop-ic { font-size: 42px; display: block; margin-bottom: 8px; }
+#dropOverlay .drop-box b { font-size: 16px; display: block; }
+#dropOverlay .drop-box small { color: var(--txt2); font-size: 12px; display: block; margin-top: 4px; }

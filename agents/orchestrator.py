@@ -15,7 +15,8 @@ from collections.abc import Generator
 
 from core import rag, websearch, gpatool
 from core.translate import quick_translate
-from core.config import load_config, resolve_provider, provider_supports_vision, get_model_key
+from core.config import (load_config, resolve_provider, provider_supports_vision,
+                         get_model_key, get_fallback)
 from core.llm import LLMError, stream_chat, complete
 from .registry import AGENT_MAP, COMMON_RULES
 
@@ -25,8 +26,28 @@ TAG_ANSWER = "[[ANSWER]]"
 GPA_RE = re.compile(r"gpa|معدل|تراكمي|تقديرات|احسب.*درجات|حساب.*معدل", re.I)
 CV_RE = re.compile(r"\bcv\b|سيرة|resume|ats", re.I)
 _GRADE_TOKEN = re.compile(r"(A\+|A-|B\+|B-|C\+|C-|D\+|ممتاز|جيد جداً?|مقبول|ضعيف|راسب|[A-F]\b)", re.I)
-GREETING_RE = re.compile(r"^\s*(?:هاي|هلا|هلو|أهلا|اهلا|أهلًا|اهلا وسهلا|مرحبا|مرحباً|السلام عليكم|وعليكم السلام|صباح الخير|مساء الخير|صباح النور|مساء النور|hi+|hello+|hey+|yo+|good\s+(?:morning|evening|afternoon|night)|bonjour|salut|bonsoir)[\s!?.،,~]*$", re.I)
-SHORT_SMALLTALK_RE = re.compile(r"^\s*(?:شكرا|شكرًا|thanks|thank you|thx|ok|okay|تمام|ماشي|حسنا|حسنًا|yes|no|نعم|لا|ايوه|أيوه)[\s!?.،,~]*$", re.I)
+GREETING_RE = re.compile(r"^\s*(?:هاي|هلا|هلو|أهلا|اهلا|أهلًا|اهلا وسهلا|مرحبا|مرحباً|السلام عليكم|وعليكم السلام|صباح الخير|مساء الخير|صباح النور|مساء النور|hi+|hello+|hey+|yo+|good\s+(?:morning|evening|afternoon|night)|bonjour|salut|bonsoir)[\s!?.؟،,~]*$", re.I)
+SHORT_SMALLTALK_RE = re.compile(r"^\s*(?:شكرا|شكرًا|thanks|thank you|thx|ok|okay|تمام|ماشي|حسنا|حسنًا|yes|no|نعم|لا|ايوه|أيوه)[\s!?.؟،,~]*$", re.I)
+# تحية + سؤال عن الحال: يجب أن تُقابَل بردّ طبيعي بدل استهلاك كل ميزانية الإخراج في التفكير.
+HOW_ARE_YOU_RE = re.compile(
+    r"^\s*(?:هاي|هلا|هلو|أهلا|اهلا|أهلًا|مرحبا|مرحباً|السلام عليكم|hi+|hello+|hey+|bonjour|salut)"
+    r"[\s,!،.~]*(?:كيف\s*(?:حالك|حالكم|الحال|كيفك)|شلونك|عامل\s*إيه|إيه\s*أخبارك|اخبارك|"
+    r"how\s+(?:are|r)\s+(?:you|u)|how'?s\s+it\s+going|comment\s+(?:vas|ça\s+va))"
+    r"(?:\s+(?:اليوم|النهاردة|دلوقتي|الآن|today|now))?[\s?!.؟،,~]*$", re.I)
+
+
+def _looks_like_reasoning(text: str) -> bool:
+    """يكشف تسريب سلسلة التفكير داخل الإجابة عندما يتجاهل النموذج وسوم التفكير."""
+    head = (text or "").strip()[:320].lower()
+    if not head:
+        return False
+    markers = (
+        "the user", "we need", "i need", "i should", "let me", "the question",
+        "we must", "okay,", "first, i", "looking at the", "the request",
+        "لا علاقة للسياق", "سأرد", "خطة الإجابة", "المطلوب", "نحتاج", "يجب أن",
+        "التحليل:", "أولاً،", "أولا،", "نعم، السؤال", "هذا سؤال",
+    )
+    return any(head.startswith(m) or (m in head[:120]) for m in markers)
 
 
 def _classify_keywords(message: str) -> dict:
@@ -187,53 +208,75 @@ class _TagSplitter:
         return out
 
 
-def _chat_candidates(cfg: dict, prov: dict, model: str) -> list[tuple[str, str, str]]:
-    """سلسلة تفاوض المزودات: الأساسي أولاً ثم بدائل مجانية تلقائية — حتى لا يتوقف الذكاء أبداً."""
-    cands = [(prov["provider"], model, get_model_key(prov["provider"], model, cfg))]
+def _looks_document_specific(message: str) -> bool:
+    """أسئلة تشير إلى ملف/كود/وثيقة يجب أن تُفعّل RAG حتى لو صنّفها الراوتر عامة."""
+    m = (message or "").lower()
+    if re.search(r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|md|json|py|js|ts|html|zip)\b", m):
+        return True
+    if re.search(r"\b(code|ocr|secret|token|id|file|document|source)\b|ملف|مستند|وثيقة|مصدر|مرفق|كود|رمز|سر|اختبار", m):
+        return True
+    if re.search(r"\b[a-z]{2,}[-_]\d{2,}|\b[a-z]+_[a-z_]+\b", m):
+        return True
+    return False
+
+
+def _cand(provider: str, model: str, key: str, base_url: str = "") -> dict:
+    return {"provider": provider, "model": model, "key": key, "base_url": base_url}
+
+
+def _chat_candidates(cfg: dict, prov: dict, model: str) -> list[dict]:
+    """سلسلة تفاوض المزودات: الأساسي أولاً ثم بدائل مجانية ثم المزود الاحتياطي — حتى لا يتوقف الذكاء أبداً."""
+    cands = [_cand(prov["provider"], model, get_model_key(prov["provider"], model, cfg))]
     if prov["provider"] == "openrouter":
         for alt in ("google/gemma-4-26b-a4b-it:free", "google/gemma-4-31b-it:free"):
             if alt != model:
                 k = get_model_key("openrouter", alt, cfg)
                 if k:
-                    cands.append(("openrouter", alt, k))
+                    cands.append(_cand("openrouter", alt, k))
         gk = (cfg.get("api_keys") or {}).get("gemini", "")
         if gk:
-            cands.append(("gemini", (cfg.get("stt") or {}).get("gemini_model") or "gemini-flash-lite-latest", gk))
+            cands.append(_cand("gemini", (cfg.get("stt") or {}).get("gemini_model") or "gemini-flash-lite-latest", gk))
     elif prov["provider"] in ("groq", "gemini"):
         ok = (cfg.get("api_keys") or {}).get("openrouter", "")
         if ok:
-            cands.append(("openrouter", cfg["main_models"].get("openrouter") or "openrouter/free", ok))
+            cands.append(_cand("openrouter", cfg["main_models"].get("openrouter") or "openrouter/free", ok))
         if prov["provider"] == "groq":
             gk = (cfg.get("api_keys") or {}).get("gemini", "")
             if gk:
-                cands.append(("gemini", (cfg.get("stt") or {}).get("gemini_model") or "gemini-flash-lite-latest", gk))
+                cands.append(_cand("gemini", (cfg.get("stt") or {}).get("gemini_model") or "gemini-flash-lite-latest", gk))
     if prov["provider"] == "gemini":
         gk2 = (cfg.get("api_keys") or {}).get("gemini", "")
         if gk2:
             for alt_g in ("gemini-flash-lite-latest", "gemini-3.6-flash", "gemini-3-flash"):
-                if alt_g != model and not any(c[0] == "gemini" and c[1] == alt_g for c in cands):
-                    cands.append(("gemini", alt_g, gk2))
+                if alt_g != model and not any(c["provider"] == "gemini" and c["model"] == alt_g for c in cands):
+                    cands.append(_cand("gemini", alt_g, gk2))
     # مع صور: اقتصر البدائل على نماذج قادرة على الرؤية (وإلا ادّعى نموذج نصي أنه "لا يرى")
     if prov.get("vision_model"):
-        cands = [c for c in cands if provider_supports_vision(c[0], c[1])]
+        cands = [c for c in cands if provider_supports_vision(c["provider"], c["model"])]
         # بدائل Gemini الرؤيوية: النموذج الأساسي قد لا يتاح للمفتاح (404) → جرّب التالي تلقائياً
         gk = (cfg.get("api_keys") or {}).get("gemini", "")
         if gk and prov["provider"] == "gemini":
             for alt_g in ("gemini-flash-lite-latest", "gemini-3.6-flash", "gemini-3-flash", "gemini-3-pro"):
-                if alt_g != model and not any(c[0] == "gemini" and c[1] == alt_g for c in cands):
-                    cands.append(("gemini", alt_g, gk))
+                if alt_g != model and not any(c["provider"] == "gemini" and c["model"] == alt_g for c in cands):
+                    cands.append(_cand("gemini", alt_g, gk))
         ok = (cfg.get("api_keys") or {}).get("openrouter", "")
-        if ok and not any(c[0] == "openrouter" for c in cands):
+        if ok and not any(c["provider"] == "openrouter" for c in cands):
             for alt in ("google/gemma-4-26b-a4b-it:free", "meta-llama/llama-4-scout:free"):
                 k = get_model_key("openrouter", alt, cfg)
-                if k: cands.append(("openrouter", alt, k))
+                if k:
+                    cands.append(_cand("openrouter", alt, k))
+    # المزود الاحتياطي المخصص: آخر خط دفاع فقط، ولا يُستخدم مع الصور إلا لو يدعم الرؤية.
+    fb = get_fallback(cfg)
+    if fb and not (prov.get("vision_model") and not provider_supports_vision(fb["provider"], fb["model"])):
+        cands.append(_cand(fb["provider"], fb["model"], fb["key"], fb.get("base_url", "")))
     # إزالة التكرار مع الحفاظ على الترتيب
     seen: set = set()
-    out = []
+    out: list[dict] = []
     for c in cands:
-        if c[:2] in seen:
+        sig = (c["provider"], c["model"])
+        if sig in seen:
             continue
-        seen.add(c[:2])
+        seen.add(sig)
         out.append(c)
     return out
 
@@ -241,22 +284,27 @@ def _chat_candidates(cfg: dict, prov: dict, model: str) -> list[tuple[str, str, 
 def _stream_agent(agent_id: str, cfg: dict, prov: dict, user_block: str,
                   tail: list[dict], extra_context: str = "", secondary_of: str | None = None,
                   images: list[str] | None = None, acc: dict | None = None,
-                  lang: str = "ar") -> Generator[dict, None, None]:
+                  lang: str = "ar", plain: bool = False) -> Generator[dict, None, None]:
     """بث حي لإجابة وكيل واحد مع سلسلة تفاوض تلقائية بين المزودات عند 429/5xx/مفتاح تالف."""
     acc = acc if acc is not None else {"thinking": "", "content": ""}
     model = prov.get("vision_model") or cfg["main_models"].get(prov["provider"]) or prov["model"]
     splitter = _TagSplitter()
     last_err: LLMError | None = None
-    for prov_name, model_i, key_i in _chat_candidates(cfg, prov, model):
-        skip_tags = any(k in (model_i or "").lower() for k in ("r1", "thinking", "qwq"))
-        messages = _messages_for(agent_id, cfg, user_block, tail, extra_context, secondary_of,
+    for cand in _chat_candidates(cfg, prov, model):
+        prov_name, model_i, key_i = cand["provider"], cand["model"], cand["key"]
+        skip_tags = plain or any(k in (model_i or "").lower() for k in ("r1", "thinking", "qwq"))
+        ctx = extra_context
+        if plain:
+            ctx += ("\n\n[System: Answer the user's request NOW in a complete, direct final answer. "
+                    "Do not think aloud, do not output analysis, and do not use any [[THINKING]] tag.]")
+        messages = _messages_for(agent_id, cfg, user_block, tail, ctx, secondary_of,
                                  skip_tags=skip_tags, lang=lang)
         yielded = 0
         try:
             stream = stream_chat(prov_name, model_i, messages, api_key=key_i,
                                  ollama_url=cfg.get("ollama_url", ""),
                                  temperature=float(cfg.get("temperature", 0.3)),
-                                 images=images)
+                                 images=images, base_url=cand.get("base_url", ""))
             for ev in stream:
                 yielded += 1
                 for kind, text in splitter.feed(ev["type"], ev["text"]):
@@ -283,14 +331,26 @@ def _stream_agent(agent_id: str, cfg: dict, prov: dict, user_block: str,
         raise last_err
 
 
-def _offline_answer(user_block: str, sources: list[dict], lang: str = "ar") -> Generator[dict, None, None]:
-    """وضع محلي بدون LLM: يعرض أقرب ما في الفهرس + نصائح تفعيل النموذج (عربي/إنجليزي)."""
+def _offline_answer(user_block: str, sources: list[dict], lang: str = "ar",
+                    reason: str | None = None) -> Generator[dict, None, None]:
+    """وصول احتياطي: يعرض أقرب ما في الفهرس.
+
+    reason=None  → لا يوجد نموذج مهيّأ أصلاً (وضع محلي حقيقي).
+    reason=نص   → المزوّد موجود لكنه فشل الآن (5xx/429/شبكة)؛ نوضّح السبب الحقيقي
+                  ولا ندّعي أن النموذج غير مهيّأ.
+    """
     hits = rag.search(user_block[-500:], k=4, min_score=0.01)
     en = lang == "en"
     if en:
-        yield {"type": "content", "delta": "### 📡 Local Mode (no LLM configured)\n\n"}
-        yield {"type": "content", "delta": ("I'm running **without an LLM** right now — showing the closest matches from the "
-                                            "knowledge base and your indexed files. Tools (GPA/CV) work fully.\n\n")}
+        if reason:
+            yield {"type": "content", "delta": "### 📡 Provider unavailable — showing indexed matches\n\n"}
+            yield {"type": "content", "delta": (f"The AI provider could not answer this time ({reason}). "
+                                                "Below are the closest passages from your knowledge base and indexed files. "
+                                                "This is **not** a generated answer — press **Retry** to try the provider again.\n\n")}
+        else:
+            yield {"type": "content", "delta": "### 📡 Local Mode (no LLM configured)\n\n"}
+            yield {"type": "content", "delta": ("I'm running **without an LLM** right now — showing the closest matches from the "
+                                                "knowledge base and your indexed files. Tools (GPA/CV) work fully.\n\n")}
         if hits:
             yield {"type": "content", "delta": "#### Closest matches:\n\n"}
             for i, h in enumerate(hits, 1):
@@ -298,15 +358,22 @@ def _offline_answer(user_block: str, sources: list[dict], lang: str = "ar") -> G
                 yield {"type": "content", "delta": f"**{i}. {h['title']}** (source: {h['source']})\n> {excerpt}…\n\n"}
         else:
             yield {"type": "content", "delta": "No matching chunks found — rephrase, add files, then press “Re-index”.\n\n"}
-        yield {"type": "content", "delta": (
-            "#### To enable full AI intelligence (100% free):\n"
-            "1. **Best & fully offline:** install [Ollama](https://ollama.com) then run `ollama pull llama3.1:8b`\n"
-            "2. **Or add a free key** from [Groq](https://console.groq.com), [OpenRouter](https://openrouter.ai/keys) or [Gemini](https://aistudio.google.com) in ⚙️ Settings\n\n"
-            "Ready now: the 🧮 GPA calculator and 💼 CV builder buttons.")}
+        if not reason:
+            yield {"type": "content", "delta": (
+                "#### To enable full AI intelligence (100% free):\n"
+                "1. **Best & fully offline:** install [Ollama](https://ollama.com) then run `ollama pull llama3.1:8b`\n"
+                "2. **Or add a free key** from [Groq](https://console.groq.com), [OpenRouter](https://openrouter.ai/keys) or [Gemini](https://aistudio.google.com) in ⚙️ Settings\n\n"
+                "Ready now: the 🧮 GPA calculator and 💼 CV builder buttons.")}
         return
-    yield {"type": "content", "delta": "### 📡 الوضع المحلي (بدون نموذج لغوي)\n\n"}
-    yield {"type": "content", "delta": ("أنا شغّال الآن **بدون LLM** — بجيب لك أقرب ما في قاعدة المعرفة "
-                                        "وملفاتك المفهرسة، والأدوات (GPA/CV) بتشتغل كاملة.\n\n")}
+    if reason:
+        yield {"type": "content", "delta": "### 📡 تعذّر وصول المزوّد — أقرب المقاطع من الفهرس\n\n"}
+        yield {"type": "content", "delta": (f"لم يتمكن مزوّد الذكاء الاصطناعي من الرد الآن ({reason}). "
+                                            "التالي أقرب المقاطع من قاعدة معرفتك وملفاتك المفهرسة، "
+                                            "وهو **ليس** إجابة مولّدة — اضغط **إعادة المحاولة** لمحاولة المزوّد مجدداً.\n\n")}
+    else:
+        yield {"type": "content", "delta": "### 📡 الوضع المحلي (بدون نموذج لغوي)\n\n"}
+        yield {"type": "content", "delta": ("أنا شغّال الآن **بدون LLM** — بجيب لك أقرب ما في قاعدة المعرفة "
+                                            "وملفاتك المفهرسة، والأدوات (GPA/CV) بتشتغل كاملة.\n\n")}
     if hits:
         yield {"type": "content", "delta": "#### أقرب المقاطع للموضوع:\n\n"}
         for i, h in enumerate(hits, 1):
@@ -314,11 +381,12 @@ def _offline_answer(user_block: str, sources: list[dict], lang: str = "ar") -> G
             yield {"type": "content", "delta": f"**{i}. {h['title']}** (المصدر: {h['source']})\n> {excerpt}…\n\n"}
     else:
         yield {"type": "content", "delta": "لم أجد مقاطع مطابقة في الفهرس — جرّب صياغة أخرى أو أضف ملفاتك ثم اضغط «تحديث الفهرس».\n\n"}
-    yield {"type": "content", "delta": (
-        "#### لتشغيل الذكاء الكامل (مجاني 100%):\n"
-        "1. **الأفضل والأسرع بدون إنترنت:** ثبّت [Ollama](https://ollama.com) ثم نفّذ `ollama pull llama3.1:8b`\n"
-        "2. **أو أدخل مفتاح مجاني** من [Groq](https://console.groq.com) أو [OpenRouter](https://openrouter.ai/keys) أو [Gemini](https://aistudio.google.com) في ⚙️ الإعدادات\n\n"
-        "أدوات جاهزة الآن: زر 🧮 لحساب GPA وزر 💼 لبناء CV.")}
+    if not reason:
+        yield {"type": "content", "delta": (
+            "#### لتشغيل الذكاء الكامل (مجاني 100%):\n"
+            "1. **الأفضل والأسرع بدون إنترنت:** ثبّت [Ollama](https://ollama.com) ثم نفّذ `ollama pull llama3.1:8b`\n"
+            "2. **أو أدخل مفتاح مجاني** من [Groq](https://console.groq.com) أو [OpenRouter](https://openrouter.ai/keys) أو [Gemini](https://aistudio.google.com) في ⚙️ الإعدادات\n\n"
+            "أدوات جاهزة الآن: زر 🧮 لحساب GPA وزر 💼 لبناء CV.")}
 
 
 def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = None,
@@ -338,24 +406,54 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
     for a in attachments:
         name = a.get("name") or "مرفق"
         text = (a.get("text") or "").strip()
-        if text:
-            att_notes.append(f"[مرفق: {name}]\n{text[:8000]}")
-        else:
-            att_notes.append(f"[مرفق: {name}] — ملف وسائط؛ حاول تحليله من محتواه إن أمكن.")
         data_url = a.get("dataUrl")
-        if not data_url and a.get("library_id"):
+        up = None
+        mime = (a.get("mime") or a.get("type") or "").lower()
+        kind = (a.get("kind") or "").lower()
+        if a.get("library_id"):
             try:
                 from core import history as _h
                 item = _h.get_library_item(str(a.get("library_id")))
                 if item:
                     from pathlib import Path as _P
-                    up = _P(__file__).resolve().parents[1] / "uploads" / str(item.get("stored_name",""))
-                    mime = (item.get("mime") or "").lower()
-                    if up.is_file() and mime.startswith("image/"):
-                        import base64
-                        b = up.read_bytes()
-                        if len(b) <= 6 * 1024 * 1024:
-                            data_url = "data:" + mime + ";base64," + base64.b64encode(b).decode("ascii")
+                    cand = _P(__file__).resolve().parents[1] / "uploads" / str(item.get("stored_name", ""))
+                    if cand.is_file():
+                        up = cand
+                        mime = mime or (item.get("mime") or "").lower()
+                        kind = kind or (item.get("kind") or "").lower()
+            except Exception:
+                pass
+        is_video = mime.startswith("video/") or kind == "video"
+        if is_video and up is not None:
+            # تحليل بصري حقيقي: لقطات موزّعة زمنياً تُرسل لنموذج الرؤية
+            from core import video as _video
+            info = _video.sample_frames(up)
+            if info.get("ok"):
+                times = ", ".join(f"{f['t']}s" for f in info["frames"])
+                att_notes.append(f"[فيديو: {name} — المدة {info.get('duration')} ثانية، "
+                                 f"{len(info['frames'])} لقطات مرفقة عند الأزمنة: {times}. "
+                                 "اللقطات مرتبة زمنياً؛ اربط الوصف بالأزمنة.]")
+                images.extend(f["dataUrl"] for f in info["frames"])
+            else:
+                att_notes.append(f"[فيديو: {name}] — تعذر استخراج لقطات: {info.get('error')}")
+            tr = _video.transcribe_audio(up)
+            if tr.get("ok"):
+                att_notes.append(f"[تفريغ صوت الفيديو: {name}]\n{tr['text'][:6000]}")
+            else:
+                att_notes.append(f"[صوت الفيديو: {name}] — التفريغ غير متاح ({tr.get('reason')})؛ "
+                                 "لا تدّعِ سماع كلام لم يُفرّغ.")
+        elif text:
+            att_notes.append(f"[مرفق: {name}]\n{text[:8000]}")
+        elif data_url and str(data_url).startswith("data:image/"):
+            att_notes.append(f"[صورة مرفقة: {name}]")
+        else:
+            att_notes.append(f"[مرفق: {name}] — ملف وسائط؛ حاول تحليله من محتواه إن أمكن.")
+        if not data_url and up is not None and (mime.startswith("image/") or kind == "image"):
+            try:
+                import base64
+                b = up.read_bytes()
+                if len(b) <= 6 * 1024 * 1024:
+                    data_url = "data:" + (mime or "image/jpeg") + ";base64," + base64.b64encode(b).decode("ascii")
             except Exception:
                 pass
         if data_url and str(data_url).startswith("data:image/"):
@@ -413,6 +511,13 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
         yield sse({"type": "content", "delta": greet})
         yield sse({"type": "done", "content": greet, "thinking": "", "sources": []})
         return
+    if 'HOW_ARE_YOU_RE' in globals() and HOW_ARE_YOU_RE.match(clean_msg) and not attachments and not images:
+        yield sse({"type": "route", "agents": [{"id": "research", "name": AGENT_MAP["research"]["name"], "icon": AGENT_MAP["research"].get("icon","🔍")}]})
+        reply = ("أهلًا! أنا بخير، شكرًا لسؤالك 😊 كيف أقدر أساعدك اليوم؟" if lang == "ar"
+                 else "Hi! I'm doing well, thanks for asking 😊 How can I help you today?")
+        yield sse({"type": "content", "delta": reply})
+        yield sse({"type": "done", "content": reply, "thinking": "", "sources": []})
+        return
     if 'SHORT_SMALLTALK_RE' in globals() and SHORT_SMALLTALK_RE.match(clean_msg) and not attachments and not images:
         yield sse({"type": "route", "agents": [{"id": "research", "name": AGENT_MAP["research"]["name"], "icon": AGENT_MAP["research"].get("icon","🔍")}]})
         reply = "على الرحب والسعة! إذا احتجت أي مساعدة أنا موجود." if lang == "ar" else "You're welcome! I'm here if you need anything."
@@ -453,7 +558,7 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
 
     # ---------- RAG + ويب (استرجاع ثنائي اللغة: سؤال إنجليزي يبحث عربي والعكس)
     ctx_block, sources = "", []
-    if route.get("needs_rag", True):
+    if route.get("needs_rag", True) or _looks_document_specific(message):
         search_query = message
         try:
             has_ar = bool(re.search(r"[\u0600-\u06FF]", message))
@@ -471,6 +576,14 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
             ctx_block, sources = rag.build_context(search_query, k=int(cfg.get("rag_k", 6)))
         except Exception:
             ctx_block, sources = "", []
+        # استرجاع إضافي من ملفات الجامعة المرفوعة (المواد الدراسية الفعلية للطالب)
+        try:
+            u_ctx, u_sources = rag.build_university_context(search_query, k=int(cfg.get("rag_k", 6)))
+            if u_ctx:
+                ctx_block = (ctx_block + "\n\n" + u_ctx) if ctx_block else u_ctx
+                sources = sources + u_sources
+        except Exception:
+            pass
     web_sources: list[dict] = []
     web_block = ""
     if route.get("needs_web") and cfg.get("web_search", True):
@@ -517,6 +630,28 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
                                     lang=lang):
                 yield sse(ev)
             all_think, all_content = acc["thinking"], acc["content"]
+            if all_content.strip() and not all_think.strip() and _looks_like_reasoning(all_content):
+                # النموذج كتب تفكيره كإجابة (تجاهل الوسوم). لا نعرضه كإجابة نهائية.
+                all_think = all_content.strip()
+                all_content = ""
+            if not all_content.strip():
+                # بعض النماذج تستهلك كل الميزانية في التفكير وتترك الإجابة فارغة.
+                # نطلب إجابة مباشرة مرة واحدة بدل حفظ رسالة فارغة للمستخدم.
+                acc2 = {"thinking": "", "content": ""}
+                for ev in _stream_agent(primary, cfg, prov, user_block, tail,
+                                        extra_context=route_extra, images=images or None,
+                                        acc=acc2, lang=lang, plain=True):
+                    yield sse(ev)
+                if acc2["thinking"]:
+                    all_think += ("\n\n" + acc2["thinking"])
+                all_content = acc2["content"]
+            if not all_content.strip():
+                msg = ("⚠️ تعذر توليد إجابة كاملة الآن. أعد المحاولة بعد لحظات أو اختر نموذجًا آخر من الإعدادات."
+                       if lang == "ar" else
+                       "⚠️ Could not generate a complete answer right now. Please retry or pick another model in Settings.")
+                all_content = msg
+                yield sse({"type": "content", "delta": msg})
+                yield sse({"type": "notice", "text": msg})
             if len(route["agents"]) > 1 and all_content.strip():
                 second = route["agents"][1]
                 yield sse({"type": "agent_switch", "agent": {"id": second, "emoji": AGENT_MAP[second]["emoji"],
@@ -532,8 +667,8 @@ def run_stream(*, chat_id: str, message: str, attachments: list[dict] | None = N
                     all_content += ("\n\n" + acc2["content"])
     except LLMError as e:
         yield sse({"type": "error", "text": str(e)})
-        # هبوط آمن: أجب من الفهرس
-        for ev in _offline_answer(user_block, sources, lang):
+        # هبوط آمن: أجب من الفهرس مع توضيح السبب الحقيقي (فشل مزوّد وليس غياب نموذج)
+        for ev in _offline_answer(user_block, sources, lang, reason=str(e)):
             all_content += ev.get("delta", "")
             yield sse(ev)
 

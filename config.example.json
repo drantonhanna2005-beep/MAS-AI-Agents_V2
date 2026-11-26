@@ -3,19 +3,22 @@
   "api_keys": {
     "groq": "",
     "openrouter": "",
-    "gemini": ""
+    "gemini": "",
+    "anthropic": ""
   },
   "main_models": {
     "ollama": "llama3.1:8b",
     "groq": "openai/gpt-oss-20b",
     "openrouter": "openrouter/free",
-    "gemini": "gemini-flash-lite-latest"
+    "gemini": "gemini-flash-lite-latest",
+    "anthropic": "claude-sonnet-4-5"
   },
   "router_models": {
     "ollama": "llama3.2:3b",
     "groq": "llama-3.1-8b-instant",
     "openrouter": "openrouter/free",
-    "gemini": "gemini-flash-lite-latest"
+    "gemini": "gemini-flash-lite-latest",
+    "anthropic": "claude-haiku-4-5"
   },
   "model_keys": {
     "openrouter": {
@@ -48,5 +51,12 @@
   "rag_k": 6,
   "embed_model": "nomic-embed-text",
   "max_agents": 2,
-  "auto_translate": true
+  "auto_translate": true,
+  "fallback": {
+    "enabled": false,
+    "provider": "custom",
+    "base_url": "",
+    "api_key": "",
+    "model": ""
+  }
 }

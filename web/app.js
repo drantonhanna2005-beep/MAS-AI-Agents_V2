@@ -42,6 +42,50 @@ function inlineMd(s) {
   return s;
 }
 /* كتلة كود احترافية: عنوان اللغة + نسخ + ملء الشاشة + تظليل خفيف بدون مكتبات (يعمل أثناء البث) */
+function _hlCode(code, lang) {
+  const escH = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const src = String(code || "");
+  const l = (lang || "").toLowerCase();
+  // لغات نصية/غير معروفة: نكتفي بالتهريب الآمن
+  if (!l || /^(text|txt|plain|plaintext|md|markdown)$/.test(l)) return escH(src);
+  const toks = [];
+  let i = 0;
+  const push = (cls, v) => toks.push(cls ? `<span class="${cls}">${escH(v)}</span>` : escH(v));
+  const keywords = {
+    common: /^(if|else|for|while|do|switch|case|break|continue|return|try|catch|finally|throw|new|class|function|def|import|from|as|in|is|not|and|or|with|async|await|yield|lambda|pass|raise|except|True|False|None|null|undefined|true|false|const|let|var|export|default|extends|implements|interface|type|public|private|protected|static|void|int|float|double|str|string|bool|boolean|list|dict|map|set|print|echo|SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|BY|ORDER|LIMIT|CREATE|TABLE|VALUES|AND|OR|NOT|NULL)$/,
+  };
+  while (i < src.length) {
+    const ch = src[i];
+    // تعليقات
+    if (ch === "/" && src[i + 1] === "/") { let j = i + 2; while (j < src.length && src[j] !== "\n") j++; push("tok-c", src.slice(i, j)); i = j; continue; }
+    if (ch === "/" && src[i + 1] === "*") { let j = i + 2; while (j < src.length && !(src[j] === "*" && src[j + 1] === "/")) j++; j = Math.min(src.length, j + 2); push("tok-c", src.slice(i, j)); i = j; continue; }
+    if (ch === "#" && !/^#([0-9a-fA-F]{3,8})\b/.test(src.slice(i))) { let j = i + 1; while (j < src.length && src[j] !== "\n") j++; push("tok-c", src.slice(i, j)); i = j; continue; }
+    if (ch === "-" && src[i + 1] === "-" && /\s/.test(src[i + 2] || " ")) { let j = i + 2; while (j < src.length && src[j] !== "\n") j++; push("tok-c", src.slice(i, j)); i = j; continue; }
+    // سلاسل نصية
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const q = ch; let j = i + 1; let escp = false;
+      while (j < src.length) { const c = src[j]; if (escp) { escp = false; j++; continue; } if (c === "\\") { escp = true; j++; continue; } if (c === q) { j++; break; } if (q !== "`" && c === "\n") break; j++; }
+      push("tok-s", src.slice(i, j)); i = j; continue;
+    }
+    // أرقام
+    if (/[0-9]/.test(ch) && (i === 0 || !/[\w$]/.test(src[i - 1]))) {
+      let j = i; if (ch === "0" && /[xXbBoO]/.test(src[j + 1] || "")) j += 2;
+      while (j < src.length && /[0-9a-fA-F_\.]/.test(src[j])) j++;
+      push("tok-n", src.slice(i, j)); i = j; continue;
+    }
+    // كلمات/معرّفات
+    if (/[A-Za-z_\u0600-\u06FF$]/.test(ch)) {
+      let j = i + 1; while (j < src.length && /[A-Za-z0-9_\u0600-\u06FF$]/.test(src[j])) j++;
+      const w = src.slice(i, j);
+      if (keywords.common.test(w) || /^(SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|BY|ORDER|LIMIT|CREATE|TABLE|VALUES|ALTER|DROP|INDEX|INTO|SET|HAVING|DISTINCT|AS)$/.test(w)) push("tok-k", w);
+      else if (/^[A-Z][A-Za-z0-9_]*$/.test(w) && !/^[A-Z_]+$/.test(w)) push("tok-t", w);
+      else push("", w);
+      i = j; continue;
+    }
+    push("", ch); i++;
+  }
+  return toks.join("");
+}
 const CB_LANG_NAMES = { py: "Python", python: "Python", js: "JavaScript", javascript: "JavaScript", ts: "TypeScript",
   typescript: "TypeScript", bash: "Bash", sh: "Shell", zsh: "Zsh", powershell: "PowerShell", ps1: "PowerShell",
   bat: "Batch", cmd: "Batch", json: "JSON", html: "HTML", xml: "XML", css: "CSS", sql: "SQL", java: "Java",
@@ -55,13 +99,14 @@ function codeBlockHtml(lang, code) {
   const label = CB_LANG_NAMES[l] || (lang ? lang.toUpperCase() : "Code");
   const id = "cb" + (++_cbSeq.n);
   const safeCode = esc(code);
+  const highlighted = _hlCode(code, l);
   return `<div class="codeblock" dir="ltr" data-cbid="${id}">` +
     `<div class="cb-head"><span class="cb-lang" title="${esc(label)}">${esc(label)}</span>` +
     `<span class="cb-actions">` +
     `<button type="button" class="cb-btn" data-cb="copy" title="${esc(t("cb_copy") || "Copy")}"><svg class="ic"><use href="#i-file"/></svg><span class="cb-txt">${esc(t("cb_copy") || "Copy")}</span></button>` +
     `<button type="button" class="cb-btn" data-cb="full" title="${esc(t("cb_fullscreen") || "Full screen")}"><svg class="ic"><use href="#i-expand"/></svg></button>` +
     `</span></div>` +
-    `<pre class="cb-pre"><code class="cb-code">${safeCode}</code></pre></div>`;
+    `<pre class="cb-pre"><code class="cb-code">${highlighted}</code></pre></div>`;
 }
 function _cbCodeOf(block) {
   const c = block?.querySelector(".cb-code");
@@ -79,10 +124,12 @@ function openCodeFullscreen(block) {
   const lang = block?.querySelector(".cb-lang")?.textContent || "Code";
   const ov = document.createElement("div");
   ov.className = "cb-modal";
+  const langAttr = (block?.querySelector(".cb-code")?.className.match(/language-([\w+#-]+)/)?.[1]) || lang || "";
+  const hl = _hlCode(code, langAttr);
   ov.innerHTML = `<div class="cb-modal-card" dir="ltr"><div class="cb-head"><span class="cb-lang">${esc(lang)}</span>` +
     `<span class="cb-actions"><button type="button" class="cb-btn" data-cb="copy"><svg class="ic"><use href="#i-file"/></svg><span class="cb-txt">${esc(t("cb_copy") || "Copy")}</span></button>` +
     `<button type="button" class="cb-btn" data-cb="close" title="${esc(t("cb_close") || "Close")}">✕</button></span></div>` +
-    `<pre class="cb-pre cb-pre-full"><code>${esc(code)}</code></pre></div>`;
+    `<pre class="cb-pre cb-pre-full"><code class="cb-code">${hl}</code></pre></div>`;
   document.body.appendChild(ov);
   const close = () => ov.remove();
   ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
@@ -394,7 +441,18 @@ function scrollBottom(force = false) {
   const sc = $("#chatScroll");
   if (!sc) return;
   const near = isNearBottom(sc, 220);
-  if (force || (near && state.stickToBottom !== false)) sc.scrollTop = sc.scrollHeight;
+  if (force || (near && state.stickToBottom !== false)) {
+    // المسافات الطويلة جداً: قفزة فورية (التمرير الملس يُستغرق >1.5ث ويبدو معلقاً)
+    const distance = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+    if (distance > 1500) {
+      const prev = sc.style.scrollBehavior;
+      sc.style.scrollBehavior = "auto";
+      sc.scrollTop = sc.scrollHeight;
+      sc.style.scrollBehavior = prev;
+    } else {
+      sc.scrollTop = sc.scrollHeight;
+    }
+  }
   scheduleNavUpdate(); updateScrollBtn();
 }
 function updateScrollBtn() {
@@ -414,9 +472,19 @@ function renderMsgAttachments(atts = []) {
   return `<div class="msg-atts">${items.map((a) => {
     const url = attachmentURL(a);
     const isImg = (a.kind === "image") || /^image\//.test(a.mime || a.type || "") || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(a.name || "");
+    const isAudio = (a.kind === "audio") || /^audio\//.test(a.mime || a.type || "") || /\.(mp3|wav|m4a|ogg|aac|flac)$/i.test(a.name || "");
+    const isVideo = (a.kind === "video") || /^video\//.test(a.mime || a.type || "") || /\.(mp4|mov|mkv|webm|avi)$/i.test(a.name || "");
     const safeName = esc(a.name || t("attachment") || "attachment");
     if (isImg && url) {
       return `<div class="msg-att img"><img src="${esc(url)}" alt="${safeName}" loading="lazy" class="att-thumb" data-full="${esc(url)}" data-name="${safeName}">
+        <div class="msg-att-bar"><span title="${safeName}">${safeName}</span><a href="${esc(url)}" download="${safeName}" class="att-dl" data-no-preview="1" title="${t("download")||"Download"}"><svg class="ic"><use href="#i-download"/></svg></a></div></div>`;
+    }
+    if (isVideo && url) {
+      return `<div class="msg-att media"><video controls preload="metadata" src="${esc(url)}"></video>
+        <div class="msg-att-bar"><span title="${safeName}">${safeName}</span><a href="${esc(url)}" download="${safeName}" class="att-dl" data-no-preview="1" title="${t("download")||"Download"}"><svg class="ic"><use href="#i-download"/></svg></a></div></div>`;
+    }
+    if (isAudio && url) {
+      return `<div class="msg-att media"><audio controls preload="metadata" src="${esc(url)}"></audio>
         <div class="msg-att-bar"><span title="${safeName}">${safeName}</span><a href="${esc(url)}" download="${safeName}" class="att-dl" data-no-preview="1" title="${t("download")||"Download"}"><svg class="ic"><use href="#i-download"/></svg></a></div></div>`;
     }
     return `<div class="msg-att file"><div class="att-file-ic"><svg class="ic"><use href="#i-file"/></svg></div><div class="att-file-meta"><b title="${safeName}">${safeName}</b><small>${esc(a.mime||a.type||a.kind||"")}</small></div>${url?`<a href="${esc(url)}" download="${safeName}" class="att-dl" data-no-preview="1" title="${t("download")||"Download"}"><svg class="ic"><use href="#i-download"/></svg></a>`:""}</div>`;
@@ -445,7 +513,7 @@ function addUserMsg(text, animate = true, meta = {}) {
       <div class="msg-meta"><span class="msg-time" data-kind="created">${fmtMsgTime(meta.created) || ""}</span>${meta.edited_at?`<span class="msg-edited">(${t("edited")||"edited"} ${fmtMsgTime(meta.edited_at)})</span>`:""}${meta.status==="error"?`<span class="msg-status err">${t("failed")||"Failed"}</span>`:""}</div>
       <div class="msg-actions">
         <button data-act="copy" title="${t("act_copy")}"><svg class="ic"><use href="#i-file"/></svg><span>${t("act_copy")}</span></button>
-        <button data-act="edit" title="${t("edit")||"Edit"}"><svg class="ic"><use href="#i-pencil"/></svg><span>${t("edit")||"Edit"}</span></button>
+        <button data-act="edit" title="${t("edit")||"Edit"}" ${meta.id == null ? 'style="display:none"' : ''}><svg class="ic"><use href="#i-pencil"/></svg><span>${t("edit")||"Edit"}</span></button>
         <button data-act="retry" title="${t("retry")||"Retry"}"><svg class="ic"><use href="#i-refresh"/></svg><span>${t("retry")||"Retry"}</span></button>
         <button data-act="branch" title="${t("branch_new")}"><svg class="ic"><use href="#i-branch"/></svg><span>${t("branch")}</span></button>
         <button data-act="share-one" title="${t("share")}"><svg class="ic"><use href="#i-share"/></svg><span>${t("share")}</span></button>
@@ -514,7 +582,7 @@ function addAiMsg(data, { instant = false } = {}) {
     <div class="msg-check"><input type="checkbox" aria-label="${t("share")}"></div>
     <div class="head"><div class="avatar">${a.emoji || "dY-"}</div>
       <div class="who">${esc(a.name || t("agent_default"))}<small>${a.role ? esc(a.role) : ""}</small></div></div>
-    ${data.thinking ? `<details class="think"${instant ? " open" : ""}><summary>${t("think_title")}</summary><div class="tbody"></div></details>` : ""}
+    ${data.thinking ? `<details class="think"><summary>${t("think_title")}</summary><div class="tbody"></div></details>` : ""}
     <div class="body"></div>
     <div class="src-row hidden"></div>
     <div class="msg-meta"><span class="msg-time" data-kind="created">${fmtMsgTime(data.created) || ""}</span>${data.status === "error" ? `<span class="msg-status err">${t("failed")||"Failed"}</span>` : ""}</div>
@@ -627,7 +695,7 @@ $("#shareCreate")?.addEventListener("click", async () => {
   try {
     const theme = document.documentElement.dataset.theme || "dark";
     const res = await api(`/api/chats/${state.currentChat}/share`, {
-      method: "POST", body: { message_ids: ids, title: chatById(state.currentChat)?.title, theme },
+      method: "POST", body: { message_ids: ids, title: chatById(state.currentChat)?.title, theme, lang: LANG },
     });
     exitShareMode();
     modalShareLink(res);
@@ -648,6 +716,7 @@ function modalShareLink(res) {
     <div class="modal-foot">
       <button class="btn primary" id="shareCopy"><svg class="ic"><use href="#i-file"/></svg>${t("share_copy")}</button>
       <a class="btn" id="shareOpen" href="${esc(res.url)}" target="_blank" rel="noopener"><svg class="ic"><use href="#i-open"/></svg>${t("share_open")}</a>
+      <button class="btn ghost" id="shareRevoke">${t("share_revoke")}</button>
       <button class="btn ghost" id="shareDone">${t("share_done")}</button>
     </div>`);
   const inp = $("#shareUrl", ov);
@@ -655,6 +724,13 @@ function modalShareLink(res) {
     try { await navigator.clipboard.writeText(res.url); }
     catch { inp.select(); document.execCommand("copy"); }
     toast(t("share_link_copied"));
+  });
+  $("#shareRevoke", ov)?.addEventListener("click", async () => {
+    try {
+      await api(`/api/share/${encodeURIComponent(res.id)}`, { method: "DELETE" });
+      ov.remove(); toast(t("share_revoked"));
+      if (state.currentChat) loadChats();
+    } catch (e) { toast(t("toast_error") + " — " + e.message, true); }
   });
   $("#shareDone", ov).addEventListener("click", () => ov.remove());
   setTimeout(() => inp.select(), 40);
@@ -954,9 +1030,26 @@ function startLiveRec(SR) {
 async function startFullRecorder() {
   Voice.cloud = true;
   if (!window.MediaRecorder) { Voice.cloud = false; return; }  // لا MediaRecorder → نكتفي بالمعاينة الحية
+  const session = (Voice.session = (Voice.session || 0) + 1);
   try {
-    Voice.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // قيود استوديو: قناة واحدة 48kHz مع تهدئة الصدى/الضجيج وتعويض الكسب تلقائيًا —
+    // أفضل وضوح لمتحدث واحد ولقاءات متعددّي المتحدثين، وبأقل فقد ممكن قبل Whisper
+    Voice.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+        sampleRate: 48000,
+        sampleSize: 16,
+      },
+    });
   } catch { toast(t("voice_permission"), true); Voice.cloud = false; return; }
+  if (session !== Voice.session || !Voice.running) {
+    // أُوقف التسجيل أثناء انتظار إذن/فتح الميكروفون — لا نترك مساراً مفتوحاً.
+    try { Voice.stream?.getTracks().forEach((x) => x.stop()); } catch {}
+    Voice.stream = null; Voice.cloud = false; return;
+  }
   // أفضل ترميز متاح (webm/opus أوسع دعم؛ وإلا mp4؛ وإلا الافتراضي)
   let mime = "";
   for (const m of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]) {
@@ -979,8 +1072,9 @@ async function startFullRecorder() {
     if (!Voice.finalizeFull || !chunks.length) return;
     await transcribeCloud(new Blob(chunks, { type }));
   };
-  // timeslice=1000ms: يرسل chunk كل ثانية فلا يضيع آخر جزء عند الإيقاف أو الانقطاع
-  Voice.mediaRec.start(1000);
+  // timeslice=500ms: قطع كل نصف ثانية — أدق في استعادة آخر كلمات عند الإيقاف
+  // أو الانقطاع، مع ضمان تسليم الجزء الأخير عند stop() بدون فقد
+  Voice.mediaRec.start(500);
 }
 
 async function transcribeCloud(blob) {
@@ -1043,17 +1137,30 @@ function stopVoice(finalize = true) {
   Voice.running = false;
   Voice.paused = false;
   Voice.finalizeFull = !!finalize;   // إيقاف = أرسل التسجيل الكامل لـ Whisper | إغلاق/إلغاء = تجاهل
+  const hadActiveRecorder = !!(Voice.mediaRec && Voice.mediaRec.state !== "inactive");
   try { Voice.rec?.stop(); } catch {}
   Voice.rec = null;
-  if (Voice.mediaRec && Voice.mediaRec.state !== "inactive") {
+  if (hadActiveRecorder) {
+    try { Voice.mediaRec.requestData(); } catch {}   // إجبار تسليم آخر جزء قبل الإيقاف
     try { Voice.mediaRec.stop(); } catch {}   // onstop يُرسل للـ STT إن كان finalize
   }
+  Voice.session = (Voice.session || 0) + 1;   // إلغاء أي بدء تسجيل لم يكتمل بعد
   if (Voice.timer) { clearInterval(Voice.timer); Voice.timer = null; }
   $("#micBtn")?.classList.remove("rec");
   voiceEl("vPause")?.classList.add("hidden");
   voiceEl("vStop")?.classList.add("hidden");
   if (finalize) {
-    if (!Voice.cloud || !Voice.processing) finishVoice();
+    if (Voice.cloud && hadActiveRecorder) {
+      // Never expose the partial live-preview transcript as final while the
+      // complete recording is still on its way to Whisper. onstop/transcribeCloud
+      // will call finishVoice() once the authoritative full transcript is ready.
+      Voice.processing = true;
+      voiceStatus(t("voice_processing") || "Processing…", false);
+      voiceEl("vInsert")?.classList.add("hidden");
+      voiceEl("vSend")?.classList.add("hidden");
+    } else if (!Voice.processing) {
+      finishVoice();
+    }
   }
 }
 
@@ -1074,6 +1181,7 @@ function voiceTranscript() {
 }
 
 function insertVoice(sendNow = false) {
+  if (Voice.processing) { toast(t("voice_processing") || "Still transcribing…", true); return; }
   const txt = voiceTranscript().trim();
   if (!txt) { toast(t("voice_empty"), true); return; }
   els.input.value = (els.input.value.trim() ? els.input.value.trim() + " " : "") + txt;
@@ -1135,6 +1243,39 @@ $("#fileInput").addEventListener("change", async (e) => {
   for (const file of e.target.files) await addAttachment(file);
   e.target.value = "";
 });
+
+/* ---------------- السحب والإفلات: أي نوع ملفات، من أي مكان في الصفحة ---------------- */
+(() => {
+  const ov = document.getElementById("dropOverlay");
+  if (!ov) return;
+  let depth = 0;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth++; ov.hidden = false;
+  });
+  window.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    ov.hidden = false;
+  });
+  window.addEventListener("dragleave", (e) => {
+    if (!hasFiles(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (!depth) ov.hidden = true;
+  });
+  window.addEventListener("drop", async (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth = 0; ov.hidden = true;
+    const files = Array.from(e.dataTransfer.files || []);
+    if (!files.length) return;
+    if (!state.currentChat) startNewChat();
+    for (const f of files) await addAttachment(f, { origin: "drop" });
+    toast(t("drop_done", { n: files.length }));
+    els.input.focus();
+  });
+})();
 async function addAttachment(file, opts = {}) {
   const att = { name: file.name, size: file.size, type: file.type, file, text: "", dataUrl: null,
                 library_id: null, kind: opts.kind || "" };
@@ -1144,6 +1285,8 @@ async function addAttachment(file, opts = {}) {
       r.onload = () => res(r.result);
       r.readAsDataURL(file);
     });
+    // تقسيم تلقائي للصور الكبيرة — بعض البوابات ترفض طلبات الصور الضخمة
+    att.dataUrl = await downscaleImage(att.dataUrl);
   }
   state.attachments.push(att);
   renderAttachments();
@@ -1207,6 +1350,26 @@ function iconFor(a) {
   return { pdf: "📕", docx: "📘", xlsx: "📊", csv: "📊", pptx: "📙", txt: "📄", md: "📄", json: "🧾" }[ext] || "📎";
 }
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : (n / 1024).toFixed(0) + " KB";
+
+/* تصغير الصور الكبيرة تلقائياً قبل الإرسال (حتى 2048px وحتى ~1.5MB بترميز base64)
+   حتى لا يرفضها المزود — البوابة تقطع الاتصال فوق ذلك حجمًا (مُثبت بالاختبار) */
+async function downscaleImage(dataUrl, maxSide = 2048, maxBytes = 1_500_000) {
+  try {
+    if (!dataUrl.startsWith("data:image/") || dataUrl.length * 0.75 <= maxBytes) return dataUrl;
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl; });
+    const side = Math.max(img.naturalWidth, img.naturalHeight);
+    if (side <= 0) return dataUrl;
+    const scale = Math.min(1, maxSide / side);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    let out = canvas.toDataURL("image/webp", 0.92);
+    if (out.length * 0.75 > maxBytes) out = canvas.toDataURL("image/jpeg", 0.88);
+    return out.length < dataUrl.length ? out : dataUrl;
+  } catch { return dataUrl; }
+}
 
 /* ---------------- الكاميرا المباشرة ---------------- */
 $("#cameraBtn").addEventListener("click", openCamera);
@@ -1311,13 +1474,18 @@ async function startEditUserMsg(div) {
   if (state.streaming) return;
   const data = div._msgData || {};
   const mid = div.dataset.mid;
-  // Validate that we have a message ID
-  if (!mid) {
-    toast(t("no_message_id") || "Cannot edit: message ID not found");
+  // Validate that we have a persisted message ID and a real chat id. Editing an
+  // optimistic/unsaved message used to build /api/chats/null/... and surface 404.
+  if (!mid || !/^\d+$/.test(String(mid))) {
+    toast(t("no_message_id") || "Cannot edit: message ID not found", true);
+    return;
+  }
+  if (!state.currentChat) {
+    toast(t("edit_failed") || "Cannot edit this message right now", true);
     return;
   }
   // اربط التعديل بمحادثته الأصلية — لو بدّل المستخدم المحادثة قبل الحفظ لا يحدث 404 خاطئ
-  pendingEdit = { id: mid, chatId: state.currentChat, attachments: (data.attachments || []).slice() };
+  pendingEdit = { id: mid, chatId: state.currentChat, originalText: data.text || "", attachments: (data.attachments || []).slice() };
   els.input.value = data.text || ""; autosize(); els.input.focus();
   els.input.dataset.editing = mid;
   els.sendBtn.title = t("save_edit") || "Save edit";
@@ -1353,27 +1521,60 @@ async function send() {
   const chatId = await ensureChat();
 
   if (els.input.dataset.editing && pendingEdit?.id) {
-    const mid = Number(pendingEdit.id);
-    const editChat = pendingEdit.chatId || chatId;  // محادثة الرسالة الأصلية، لا المحادثة الحالية
+    const editChat = pendingEdit.chatId || state.currentChat;
+    const originalMid = pendingEdit.id;
+    const ar = LANG === "ar";
+    if (!editChat || !/^\d+$/.test(String(originalMid))) {
+      toast(t("edit_failed") || "Cannot edit this message right now", true);
+      clearEditMode();
+      return;
+    }
     els.sendBtn.disabled = true;
+    const patch = (mid) => api(`/api/chats/${editChat}/messages/${mid}`, {
+      method: "PATCH", body: { content: text, attachments: pendingEdit.attachments }
+    });
+    let res = null;
     try {
-      const res = await api(`/api/chats/${editChat}/messages/${mid}`, { method: "PATCH", body: { content: text, attachments: pendingEdit.attachments } });
+      try {
+        res = await patch(originalMid);
+      } catch (first) {
+        const msg = String(first.message || "");
+        // A stale id is the real cause of the intermittent 404: the message was
+        // re-saved/re-generated or the list was re-rendered from a different chat.
+        // Refresh the authoritative list and match the original text before giving up.
+        if (/404|not found|message_not_found/i.test(msg)) {
+          const list = await api(`/api/chats/${editChat}/messages`).catch(() => null);
+          const want = normalizeUserText(pendingEdit.originalText || "").trim();
+          const found = (list?.messages || []).find((m) => m.role === "user" &&
+            (want ? normalizeUserText(m.content || "").trim() === want : String(m.id) === String(originalMid)));
+          if (found && String(found.id) !== String(originalMid)) {
+            res = await patch(found.id);
+          } else if (found) {
+            res = await patch(found.id);
+          } else {
+            throw first;
+          }
+        } else if (/fetch|network|Failed/i.test(msg)) {
+          await new Promise((r) => setTimeout(r, 600));
+          res = await patch(originalMid); // safe single retry for transient network failure
+        } else {
+          throw first;
+        }
+      }
       clearEditMode();
       els.input.value = ""; autosize();
       if (state.currentChat !== editChat) { state.currentChat = editChat; renderChatList(); updateChatTitle(); }
       await openChat(editChat);
-      const editAtts = res.message?.attachments || pendingEdit.attachments || [];
+      const editAtts = res?.message?.attachments || pendingEdit.attachments || [];
       await streamChat({ chat_id: editChat, message: text, attachments: editAtts, lang: LANG, __skipUserAdd: true, skip_user_save: true });
     } catch (e) {
-      // تمييز نوع الخطأ بدقة بدل عرض 404 عام: رسالة غير محفوظة بعد / محادثة خاطئة / خطأ شبكة
       const m = String(e.message || "");
       let hint = "";
-      const ar = LANG === "ar";
-      if (/404/.test(m)) hint = ar ? " — الرسالة غير محفوظة بعد أو المحادثة تغيّرت. أعد فتح المحادثة وحاول مجدداً." : " — message not saved yet or chat changed. Reopen the chat and retry.";
+      if (/404|not found|message_not_found/i.test(m)) hint = ar ? " — الرسالة لم تعد موجودة أو تغيّرت المحادثة. أعد فتح المحادثة وحاول مجدداً." : " — the message no longer exists or the chat changed. Reopen the chat and retry.";
       else if (/fetch|network|Failed/i.test(m)) hint = ar ? " — تعذر الاتصال بالخادم. تحقق من التشغيل." : " — server unreachable.";
       toast((t("edit_failed") || "Edit failed") + ": " + m + hint, true);
-      // إعادة تحميل المحادثة للتخلص من أي حالة قديمة (stale)
-      if (/404/.test(m)) { clearEditMode(); await openChat(editChat).catch(() => {}); }
+      clearEditMode();
+      await openChat(editChat).catch(() => {});
     }
     finally { els.sendBtn.disabled = false; }
     return;
@@ -1398,7 +1599,7 @@ async function regenerate() {
 
 function finalizeStream(holder) {
   $(".typing", holder.body)?.remove();
-  holder.root.querySelectorAll("details.think.live").forEach(d => d.classList.remove("live"));
+  holder.root.querySelectorAll("details.think.live").forEach(d => { d.classList.remove("live"); d.open = false; });
   state.streaming = false; els.sendBtn.disabled = false;
   refreshHealth(); loadChats().then(()=>{ updateChatTitle(); renderConvNav(); });
   updateScrollBtn();
@@ -1410,7 +1611,9 @@ async function consumeSSE(res, holder, buf, stateRef) {
   let acc = "";
   const ensureThink = () => {
     if (!stateRef.thinkEl) {
-      holder.root.insertAdjacentHTML("afterbegin", `<details class="think live" open><summary>${t("think_title")}</summary><div class="tbody"></div></details>`);
+      const bodyEl = $(".body", holder.root);
+      if (bodyEl) bodyEl.insertAdjacentHTML("beforebegin", `<details class="think live" open><summary>${t("think_title")}</summary><div class="tbody"></div></details>`);
+      else holder.root.insertAdjacentHTML("beforeend", `<details class="think live" open><summary>${t("think_title")}</summary><div class="tbody"></div></details>`);
       stateRef.thinkEl = $("details.think:not(.tr)", holder.root);
     }
     return $(".tbody", stateRef.thinkEl);
@@ -1426,7 +1629,7 @@ async function consumeSSE(res, holder, buf, stateRef) {
       }
       case "thinking": { const tb = ensureThink(); tb.textContent += ev.delta || ""; scrollBottom(); break; }
       case "content": {
-        if (stateRef.firstContent) { $(".typing", holder.body)?.remove(); stateRef.firstContent = false; if (stateRef.thinkEl) stateRef.thinkEl.classList.remove("live"); }
+        if (stateRef.firstContent) { $(".typing", holder.body)?.remove(); stateRef.firstContent = false; if (stateRef.thinkEl) { stateRef.thinkEl.classList.remove("live"); stateRef.thinkEl.open = false; } }
         buf.push(ev.delta || "");
         if (!stateRef.ctext) { stateRef.ctext = document.createElement("div"); stateRef.ctext.className = "ai-text"; holder.body.appendChild(stateRef.ctext); }
         stateRef.ctext.innerHTML = md(buf.join(""));
@@ -1446,6 +1649,7 @@ async function consumeSSE(res, holder, buf, stateRef) {
           stateRef.userDiv.dataset.mid = ev.message.id;
           const tm = stateRef.userDiv.querySelector('.msg-time'); if(tm) tm.textContent = fmtMsgTime(ev.message.created);
           const st = stateRef.userDiv.querySelector('.msg-status.pending'); if(st) st.remove();
+          const eb = stateRef.userDiv.querySelector('[data-act="edit"]'); if (eb) eb.style.display = '';
           if (stateRef.userDiv._msgData) { stateRef.userDiv._msgData.created = ev.message.created; stateRef.userDiv._msgData.status = "ok"; }
         } break;
       }
@@ -1460,7 +1664,21 @@ async function consumeSSE(res, holder, buf, stateRef) {
         if (holder.status === "error") { const meta=holder.root.querySelector('.msg-meta'); if(meta && !meta.querySelector('.msg-status.err')) meta.insertAdjacentHTML('beforeend', `<span class="msg-status err">${t("failed")||"Failed"}</span>`); }
         break;
       }
-      case "done": { holder.raw = buf.join("") || holder.raw; holder.sources = ev.sources || []; renderSources(holder.srcRow, holder.sources); break; }
+      case "done": {
+        const finalText = String(ev.content || "");
+        const streamed = buf.join("");
+        if (stateRef.thinkEl) { stateRef.thinkEl.classList.remove("live"); stateRef.thinkEl.open = false; }
+        if (finalText.trim() && finalText.trim() !== streamed.trim()) {
+          // الخادم يملك النسخة النهائية الموثوقة (بعد إزالة التفكير المسرّب أو إضافة وكيل ثانٍ).
+          buf.length = 0; buf.push(finalText);
+          holder.raw = finalText;
+          if (!stateRef.ctext) { stateRef.ctext = document.createElement("div"); stateRef.ctext.className = "ai-text"; holder.body.appendChild(stateRef.ctext); }
+          stateRef.ctext.innerHTML = md(finalText);
+        } else {
+          holder.raw = streamed || holder.raw;
+        }
+        holder.sources = ev.sources || []; renderSources(holder.srcRow, holder.sources); break;
+      }
     }
   };
   while (true) {
@@ -1584,6 +1802,7 @@ async function modalSettings() {
           <option value="auto" ${s.provider === "auto" ? "selected" : ""}>${t("prov_auto")}</option>
           <option value="ollama" ${s.provider === "ollama" ? "selected" : ""}>${t("prov_ollama")}</option>
           <option value="groq" ${s.provider === "groq" ? "selected" : ""}>${t("prov_groq")}</option>
+          <option value="anthropic" ${s.provider === "anthropic" ? "selected" : ""}>${t("prov_ant")}</option>
           <option value="openrouter" ${s.provider === "openrouter" ? "selected" : ""}>${t("prov_or")}</option>
           <option value="gemini" ${s.provider === "gemini" ? "selected" : ""}>${t("prov_gem")}</option>
           <option value="offline" ${s.provider === "offline" ? "selected" : ""}>${t("prov_off")}</option>
@@ -1593,6 +1812,7 @@ async function modalSettings() {
         <datalist id="ollamaModels">${models}</datalist></div>
       <div class="field"><label>${t("set_groq_key")}</label><input type="password" id="sGroq" value="${esc(s.api_keys?.groq || "")}" placeholder="gsk_..."></div>
       <div class="field"><label>${t("set_or_key")}</label><input type="password" id="sOR" value="${esc(s.api_keys?.openrouter || "")}" placeholder="sk-or-..."></div>
+      <div class="field"><label>${t("set_ant_key")}</label><input type="password" id="sAnt" value="${esc(s.api_keys?.anthropic || "")}" placeholder="sk-..."></div>
       <div class="field"><label>${t("set_gem_key")}</label><input type="password" id="sGem" value="${esc(s.api_keys?.gemini || "")}" placeholder="AIza..."></div>
       <div class="field"><label>${t("set_ollama_url")}</label><input type="text" id="sOllamaUrl" value="${esc(s.ollama_url || "http://localhost:11434")}"></div>
       <div class="field"><label>${t("set_temp")}<span id="tempVal">${s.temperature ?? 0.3}</span></label>
@@ -1601,6 +1821,8 @@ async function modalSettings() {
         <datalist id="groqChatModels"><option value="openai/gpt-oss-120b"><option value="openai/gpt-oss-20b"><option value="qwen/qwen3-32b"><option value="llama-3.3-70b-versatile"><option value="llama-3.1-8b-instant"></datalist></div>
       <div class="field"><label>${t("set_or_model")}</label><input type="text" id="sORModel" value="${esc(s.main_models?.openrouter || "")}" list="orChatModels">
         <datalist id="orChatModels"><option value="openrouter/free"><option value="google/gemma-4-26b-a4b-it:free"><option value="google/gemma-4-31b-it:free"><option value="nvidia/nemotron-3-embed-1b:free"></datalist></div>
+      <div class="field"><label>${t("set_ant_model")}</label><input type="text" id="sAntModel" value="${esc(s.main_models?.anthropic || "claude-sonnet-4-6")}" list="antChatModels">
+        <datalist id="antChatModels"><option value="claude-sonnet-4-6"><option value="claude-sonnet-5"><option value="claude-opus-5"><option value="claude-haiku-4-5-20251001"></datalist></div>
       <div class="field"><label>${t("set_gem_model")}</label><input type="text" id="sGemModel" value="${esc(s.main_models?.gemini || "")}"></div>
       <div class="field"><label>${t("stt_model")}</label><input type="text" id="sStt" value="${esc(s.stt?.model || "whisper-large-v3-turbo")}" list="sttModels">
         <datalist id="sttModels"><option value="whisper-large-v3-turbo"><option value="whisper-large-v3"></datalist></div>
@@ -1620,12 +1842,48 @@ async function modalSettings() {
     <div class="field"><label>${t("or_keys_title")}</label>
       <textarea id="sModelKeys" rows="4" placeholder="model-id=sk-or-...">${esc(mkLines)}</textarea>
       <div class="note">${t("or_keys_hint")}</div></div>
+    <div class="field"><label>${t("fb_title")}</label>
+      <label class="switch"><input type="checkbox" id="sFbEn" ${s.fallback?.enabled ? "checked" : ""}> ${t("fb_enable")}</label>
+      <div class="grid2" style="margin-top:8px">
+        <div class="field"><label>${t("fb_type")}</label>
+          <select id="sFbProv">
+            <option value="custom" ${(s.fallback?.provider || "custom") === "custom" ? "selected" : ""}>${t("fb_custom")}</option>
+            <option value="openrouter" ${s.fallback?.provider === "openrouter" ? "selected" : ""}>${t("fb_openrouter")}</option>
+          </select></div>
+        <div class="field"><label>${t("fb_base")}</label><input type="text" id="sFbUrl" value="${esc(s.fallback?.base_url || "")}" placeholder="https://api.example.com/v1"></div>
+        <div class="field"><label>${t("fb_model")}</label><input type="text" id="sFbModel" value="${esc(s.fallback?.model || "")}" placeholder="model-id"></div>
+        <div class="field"><label>${t("fb_key")}</label><input type="password" id="sFbKey" value="${esc(s.fallback?.api_key || "")}" placeholder="sk-..."></div>
+      </div>
+      <div class="note" id="sFbMsg">${t("fb_hint")}</div>
+      <button class="btn" id="sFbTest" type="button">${t("fb_test")}</button>
+    </div>
     <label class="switch"><input type="checkbox" id="sDeep" ${s.deep_think ? "checked" : ""}> ${t("set_deep")}</label>
     <label class="switch"><input type="checkbox" id="sWeb" ${s.web_search ? "checked" : ""}> ${t("set_web")}</label>
     <label class="switch"><input type="checkbox" id="sAutoTr" ${s.auto_translate ? "checked" : ""}> ${t("set_auto_tr")}</label>
     <div class="note">${t("set_clear_note")}</div>
     <div class="modal-foot"><button class="btn primary" id="sSave">${t("save")}</button></div>`);
   $("#sTemp", ov).addEventListener("input", (e) => ($("#tempVal", ov).textContent = e.target.value));
+  $("#sFbTest", ov).addEventListener("click", async () => {
+    const btn = $("#sFbTest", ov), msg = $("#sFbMsg", ov), old = btn.textContent;
+    btn.disabled = true; btn.textContent = t("fb_testing");
+    try {
+      await api("/api/settings", { method: "POST", body: { fallback: {
+        enabled: $("#sFbEn", ov).checked,
+        provider: $("#sFbProv", ov).value,
+        base_url: $("#sFbUrl", ov).value.trim(),
+        model: $("#sFbModel", ov).value.trim(),
+        api_key: $("#sFbKey", ov).value.trim(),
+      } } });
+      const r = await api("/api/fallback/test", { method: "POST", body: {} });
+      msg.textContent = r.ok
+        ? `✅ ${r.provider} / ${r.model}: ${r.reply || "OK"}`
+        : `❌ ${r.error || "failed"}`;
+      msg.style.color = r.ok ? "#1a7f37" : "#c0392b";
+    } catch (e) {
+      msg.textContent = "❌ " + (e.message || e);
+      msg.style.color = "#c0392b";
+    } finally { btn.disabled = false; btn.textContent = old; }
+  });
   $("#sSave", ov).addEventListener("click", async () => {
     await api("/api/settings", {
       method: "POST",
@@ -1635,16 +1893,24 @@ async function modalSettings() {
         main_models: {
           ollama: $("#sOllamaModel", ov).value.trim(),
           groq: $("#sGroqModel", ov).value.trim() || undefined,
+          anthropic: $("#sAntModel", ov).value.trim() || undefined,
           openrouter: $("#sORModel", ov).value.trim() || undefined,
           gemini: $("#sGemModel", ov).value.trim() || undefined,
         },
-        api_keys: { groq: $("#sGroq", ov).value.trim(), openrouter: $("#sOR", ov).value.trim(), gemini: $("#sGem", ov).value.trim() },
+        api_keys: { groq: $("#sGroq", ov).value.trim(), openrouter: $("#sOR", ov).value.trim(), gemini: $("#sGem", ov).value.trim(), anthropic: $("#sAnt", ov).value.trim() },
         stt: { model: $("#sStt", ov).value.trim() || "whisper-large-v3-turbo" },
         tts: { model: $("#sTts", ov).value.trim() || "heygen/heygen-voice-1-turbo:free",
                voice: $("#sTtsVoice", ov).value.trim() || "nadine" },
         embed: { provider: $("#sEmbP", ov).value,
                  model: $("#sEmbM", ov).value.trim() || "nvidia/nemotron-3-embed-1b:free" },
         model_keys: { openrouter: parseModelKeys($("#sModelKeys", ov).value) },
+        fallback: {
+          enabled: $("#sFbEn", ov).checked,
+          provider: $("#sFbProv", ov).value,
+          base_url: $("#sFbUrl", ov).value.trim(),
+          model: $("#sFbModel", ov).value.trim(),
+          api_key: $("#sFbKey", ov).value.trim(),
+        },
         temperature: parseFloat($("#sTemp", ov).value),
         deep_think: $("#sDeep", ov).checked,
         web_search: $("#sWeb", ov).checked,
@@ -1687,11 +1953,20 @@ async function modalLinks() {
 }
 
 /* ------- نافذة حاسبة GPA ------- */
+function toLatinDigits(v) {
+  return String(v ?? "")
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+}
+const GPA_GRADES = {
+  egypt5: ["ممتاز", "جيد جدا", "جيد", "مقبول", "ضعيف", "راسب"],
+  standard4: ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "F"],
+};
 function gpaRowHTML(r = {}) {
   return `<div class="gpa-row">
     <input class="g-course" type="text" placeholder="${t("g_course_ph")}" value="${esc(r.course || "")}">
-    <input class="g-hours" type="number" min="0.5" step="0.5" placeholder="${t("g_hours_ph")}" value="${r.hours ?? ""}">
-    <input class="g-grade" type="text" placeholder="${t("g_grade_ph")}" value="${esc(r.grade || "")}">
+    <input class="g-hours" type="number" min="0.5" step="0.5" inputmode="decimal" placeholder="${t("g_hours_ph")}" value="${r.hours ?? ""}">
+    <input class="g-grade" type="text" list="gGradeOptions" autocomplete="off" placeholder="${t("g_grade_ph")}" value="${esc(r.grade || "")}">
     <button class="btn g-del" title="✕">✕</button></div>`;
 }
 function modalGPA() {
@@ -1703,6 +1978,8 @@ function modalGPA() {
       </select></div>
     <div class="gpa-head">${t("g_head")}</div>
     <div id="gRows">${gpaRowHTML()}${gpaRowHTML()}${gpaRowHTML()}</div>
+    <datalist id="gGradeOptions"></datalist>
+    <div class="gpa-hint">${t("g_grades_hint")}</div>
     <button class="btn" id="gAdd">${t("g_add")}</button>
     <div class="grid2" style="margin-top:12px">
       <div class="field"><label>${t("g_prev")}</label><input type="number" id="gPrev" step="0.01" min="0" placeholder="${t("g_prev_ph")}"></div>
@@ -1714,25 +1991,53 @@ function modalGPA() {
       <button class="btn hidden" id="gSave">${t("g_save_chat")}</button>
     </div>`, true);
   const rowsEl = $("#gRows", ov);
+  const gradeList = $("#gGradeOptions", ov);
+  const scaleSel = $("#gScale", ov);
+  const syncGrades = () => {
+    const grades = GPA_GRADES[scaleSel.value] || [];
+    gradeList.innerHTML = grades.map((g) => `<option value="${esc(g)}"></option>`).join("");
+  };
+  scaleSel.addEventListener("change", syncGrades);
+  syncGrades();
   $("#gAdd", ov).addEventListener("click", () => rowsEl.insertAdjacentHTML("beforeend", gpaRowHTML()));
   rowsEl.addEventListener("click", (e) => { if (e.target.closest(".g-del")) e.target.closest(".gpa-row").remove(); });
   let lastMd = "";
   $("#gCalc", ov).addEventListener("click", async () => {
-    const rows = $$(".gpa-row", rowsEl).map((r) => ({
-      course: $(".g-course", r).value.trim(),
-      hours: parseFloat($(".g-hours", r).value),
-      grade: $(".g-grade", r).value.trim(),
-    })).filter((r) => r.hours > 0 && r.grade);
+    const btn = $("#gCalc", ov);
+    const rows = [];
+    const problems = [];
+    $$(".gpa-row", rowsEl).forEach((r, i) => {
+      const course = $(".g-course", r).value.trim();
+      const hoursRaw = $(".g-hours", r).value.trim();
+      const grade = $(".g-grade", r).value.trim();
+      if (!course && !hoursRaw && !grade) return;     // صف فارغ لم يلمسه المستخدم
+      const label = course || `#${i + 1}`;
+      if (!grade) { problems.push(`${label}: ${t("g_need_grade")}`); return; }
+      const hours = parseFloat(toLatinDigits(hoursRaw));
+      if (!(hours > 0)) { problems.push(`${label}: ${t("g_need_hours")}`); return; }
+      rows.push({ course, hours, grade });
+    });
+    if (problems.length) { toast(problems.join(" • "), true); if (!rows.length) return; }
     if (!rows.length) { toast(t("t_gpa_need"), true); return; }
-    const body = { rows, scale: $("#gScale", ov).value, lang: LANG };
-    const pg = parseFloat($("#gPrev", ov).value), ph = parseFloat($("#gPrevH", ov).value);
+    const body = { rows, scale: scaleSel.value, lang: LANG };
+    const pg = parseFloat(toLatinDigits($("#gPrev", ov).value)), ph = parseFloat(toLatinDigits($("#gPrevH", ov).value));
     if (!isNaN(pg)) body.previous_gpa = pg;
     if (!isNaN(ph) && ph > 0) body.previous_hours = ph;
-    const res = await api("/api/tools/gpa", { method: "POST", body });
-    if (res.error) { toast(res.error, true); return; }
-    lastMd = res.markdown;
-    $("#gResult", ov).innerHTML = `<div class="gpa-result">${md(lastMd)}</div>`;
-    $("#gSave", ov).classList.remove("hidden");
+    const oldHtml = btn.innerHTML;
+    btn.disabled = true; btn.classList.add("loading");
+    try {
+      const res = await api("/api/tools/gpa", { method: "POST", body });
+      if (res.error) { toast(res.error, true); return; }
+      lastMd = res.markdown;
+      $("#gResult", ov).innerHTML = `<div class="gpa-result">${md(lastMd)}</div>`;
+      $("#gSave", ov).classList.remove("hidden");
+    } catch (e) {
+      // خطأ تحقق/شبكة: رسالة واضحة داخل النافذة بدون unhandled rejection.
+      toast(e.message || t("toast_error"), true);
+      $("#gResult", ov).innerHTML = `<div class="gpa-result gpa-error">${esc(e.message || t("toast_error"))}</div>`;
+    } finally {
+      btn.disabled = false; btn.classList.remove("loading"); btn.innerHTML = oldHtml;
+    }
   });
   $("#gSave", ov).addEventListener("click", async () => {
     if (!lastMd) return;
@@ -2103,6 +2408,56 @@ async function init() {
 }
 init().catch((e) => toast(t("t_init_err") + e.message, true));
 
+/* ---------------- PWA: تثبيت التطبيق + Service Worker ---------------- */
+let _pwaPrompt = null;
+function initPWA() {
+  const standalone = window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true;
+  if ("serviceWorker" in navigator && location.protocol !== "file:" && !standalone) {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+  }
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    _pwaPrompt = e;
+    if (standalone) return;
+    const dismissedAt = Number(localStorage.getItem("mas-pwa-dismissed") || 0);
+    if (dismissedAt && Date.now() - dismissedAt < 14 * 24 * 3600 * 1000) return;
+    showPWAInstallBanner();
+  });
+  window.addEventListener("appinstalled", () => {
+    document.getElementById("pwaBanner")?.remove();
+    _pwaPrompt = null;
+    toast(t("pwa_installed") || "تم تثبيت التطبيق ✅");
+  });
+}
+function showPWAInstallBanner() {
+  if (document.getElementById("pwaBanner")) return;
+  const isAr = (state.lang || document.documentElement.lang || "ar").startsWith("ar");
+  const b = document.createElement("div");
+  b.id = "pwaBanner";
+  b.className = "pwa-banner";
+  b.setAttribute("role", "dialog");
+  b.setAttribute("aria-live", "polite");
+  b.innerHTML = `<img src="/static/assets/fav/icon-64.png" alt="" class="pwa-ico">
+    <div class="pwa-txt"><b>${esc(t("pwa_title") || (isAr ? "ثبّت MAS AI على جهازك" : "Install MAS AI on your device"))}</b>
+      <small>${esc(t("pwa_sub") || (isAr ? "تطبيق سريع يعمل في نافذة مستقلة — بدون متجر." : "A fast standalone app — no app store needed."))}</small></div>
+    <button type="button" class="pwa-install" id="pwaInstall">${esc(t("pwa_install") || (isAr ? "تثبيت" : "Install"))}</button>
+    <button type="button" class="pwa-close" id="pwaClose" aria-label="${esc(t("pwa_dismiss") || (isAr ? "إغلاق" : "Dismiss"))}">✕</button>`;
+  document.body.appendChild(b);
+  document.getElementById("pwaInstall")?.addEventListener("click", async () => {
+    if (!_pwaPrompt) { b.remove(); return; }
+    _pwaPrompt.prompt();
+    try { await _pwaPrompt.userChoice; } catch {}
+    _pwaPrompt = null;
+    b.remove();
+  });
+  document.getElementById("pwaClose")?.addEventListener("click", () => {
+    localStorage.setItem("mas-pwa-dismissed", String(Date.now()));
+    b.remove();
+  });
+}
+initPWA();
+
+
 
 function renderConversationFeedback(chat) {
   const existing = document.getElementById('convFeedbackPrompt');
@@ -2117,25 +2472,39 @@ function renderConversationFeedback(chat) {
   wrap.id = 'convFeedbackPrompt';
   wrap.className = 'conv-feedback';
   const isAr = (state.lang || document.documentElement.lang || 'ar').startsWith('ar');
-  const q = isAr ? 'هل هذه المحادثة مفيدة حتى الآن؟' : 'Is this conversation helpful so far?';
+  const q = t('feedback_helpful') || (isAr ? 'هل هذه المحادثة مفيدة حتى الآن؟' : 'Is this conversation helpful so far?');
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', q);
   wrap.innerHTML = `
     <div class="conv-feedback-inner">
       <span class="conv-feedback-q">${esc(q)}</span>
       <div class="conv-feedback-actions">
-        <button class="conv-fb-btn like" data-v="like" title="${isAr?'مفيد':'Helpful'}">👍</button>
-        <button class="conv-fb-btn dislike" data-v="dislike" title="${isAr?'غير مفيد':'Not helpful'}">👎</button>
-        <button class="conv-fb-btn dismiss" data-v="dismiss" title="${isAr?'إخفاء':'Dismiss'}">✕</button>
+        <button class="conv-fb-btn like" data-v="like" type="button" title="${esc(t('feedback_like')||'Helpful')}" aria-label="${esc(t('feedback_like')||'Helpful')}">👍</button>
+        <button class="conv-fb-btn dislike" data-v="dislike" type="button" title="${esc(t('feedback_dislike')||'Not helpful')}" aria-label="${esc(t('feedback_dislike')||'Not helpful')}">👎</button>
+        <button class="conv-fb-btn dismiss" data-v="dismiss" type="button" title="${esc(t('feedback_dismiss')||'Dismiss')}" aria-label="${esc(t('feedback_dismiss')||'Dismiss')}">✕</button>
       </div>
     </div>`;
+  let busy = false;
   wrap.querySelectorAll('[data-v]').forEach(btn => btn.addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
     const v = btn.dataset.v;
+    const chatId = state.currentChat;
+    if (!chatId) { busy = false; return; }
     try {
-      await api(`/api/chats/${state.currentChat}/conversation-feedback`, {method:'POST', body:{value:v}});
-      const c = chatById(state.currentChat);
-      if (c) { c.conversation_feedback = v==='dismiss'?null:v; c.conversation_feedback_dismissed = v==='dismiss'; c.conversation_feedback_at = Date.now()/1000; }
+      const res = await api(`/api/chats/${chatId}/conversation-feedback`, {method:'POST', body:{value:v}});
+      const c = chatById(chatId);
+      if (c) {
+        c.conversation_feedback = res.conversation_feedback ?? (v === 'dismiss' ? null : v);
+        c.conversation_feedback_dismissed = !!res.conversation_feedback_dismissed || v === 'dismiss';
+        c.conversation_feedback_at = res.conversation_feedback_at || Date.now() / 1000;
+      }
       wrap.remove();
-      if (v !== 'dismiss') toast(isAr?'شكرًا لملاحظاتك':'Thanks for your feedback');
-    } catch(e) { toast((t('toast_error')||'Error')+': '+e.message, true); }
+      if (v !== 'dismiss') toast(t('feedback_thanks') || (isAr ? 'شكرًا لملاحظاتك' : 'Thanks for your feedback'));
+    } catch(e) {
+      busy = false;
+      toast((t('toast_error') || 'Error') + ': ' + (e.message || e), true);
+    }
   }));
   els.messages.appendChild(wrap);
 }

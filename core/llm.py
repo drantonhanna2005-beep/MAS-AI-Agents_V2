@@ -15,6 +15,8 @@ import httpx
 OPENAI_BASES = {
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    # مزود Anthropic (Claude) عبر بوابة متوافقة مع OpenAI — تحقق من عمله: توليد + بث + صور ✓
+    "anthropic": "https://api.mwapi.dev/v1",
 }
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -31,6 +33,9 @@ def _friendly_error(provider: str, status: int | None, body: str) -> str:
         return f"تجاوزت حدود الاستخدام المجاني مؤقتاً في {provider} — انتظر قليلاً أو جرّب مزوداً آخر."
     if status == 404:
         return f"النموذج غير متاح لهذا المفتاح — غيّر اسم النموذج من الإعدادات ({provider})."
+    if status in (500, 502, 503, 504):
+        return (f"{provider} مشغول أو غير متاح مؤقتاً (خطأ {status}). أعد المحاولة بعد لحظات "
+                f"أو اختر مزوداً آخر من الإعدادات (⚙️).")
     snippet = (body or "")[:350].replace("\n", " ")
     return f"خطأ من {provider} (حالة {status}): {snippet}"
 
@@ -98,9 +103,13 @@ def _gemini_stream(model: str, messages: list[dict], temperature: float,
                     head, b64 = du.split(",", 1)
                     mime = head.split(":", 1)[1].split(";", 1)[0] or "image/png"
                 except Exception:
-                    mime, b64 = "image/png", du
+                    continue
+                # Gemini rejects malformed/empty inline image data; skip instead of failing the whole request.
+                if not b64 or not mime.startswith("image/"):
+                    continue
                 img_parts.append({"inlineData": {"mimeType": mime, "data": b64}})
-            contents[last_user]["parts"] = img_parts + contents[last_user]["parts"]
+            if img_parts:
+                contents[last_user]["parts"] = img_parts + contents[last_user]["parts"]
     body: dict = {"contents": contents, "generationConfig": {"temperature": temperature}}
     if sys_texts:
         body["systemInstruction"] = {"parts": [{"text": "\n\n".join(sys_texts)}]}
@@ -135,8 +144,10 @@ def _gemini_stream(model: str, messages: list[dict], temperature: float,
 
 # ------------------------------------------------------------------ OpenAI-compatible
 def _openai_stream(provider: str, api_key: str, model: str, messages: list[dict],
-                   temperature: float, images: list[str]) -> Iterator[dict]:
-    base = OPENAI_BASES[provider]
+                   temperature: float, images: list[str], base: str = "") -> Iterator[dict]:
+    base = (base or OPENAI_BASES.get(provider) or "").rstrip("/")
+    if not base:
+        raise LLMError(f"مزود {provider}: لا يوجد base_url صالح.")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if provider == "openrouter":
         headers["HTTP-Referer"] = "http://localhost:8765"
@@ -185,18 +196,30 @@ def _openai_stream(provider: str, api_key: str, model: str, messages: list[dict]
 # ------------------------------------------------------------------ الواجهة العامة
 def stream_chat(provider: str, model: str, messages: list[dict], *,
                 api_key: str = "", ollama_url: str = "http://localhost:11434",
-                temperature: float = 0.3, images: list[str] | None = None) -> Iterator[dict]:
-    """images: قائمة روابط data URL للصور (تدعم الرؤية فقط للنماذج القادرة عليها)."""
+                temperature: float = 0.3, images: list[str] | None = None,
+                base_url: str = "") -> Iterator[dict]:
+    """images: قائمة روابط data URL للصور (تدعم الرؤية فقط للنماذج القادرة عليها).
+
+    base_url: مطلوب فقط للمزود الاحتياطي «custom» (أي خدمة متوافقة مع OpenAI).
+    """
     if provider == "ollama":
         return _ollama_stream(ollama_url, model, messages, temperature, images or [])
     if provider == "gemini":
         if not api_key:
             raise LLMError("لا يوجد مفتاح Gemini — أدخله من الإعدادات (⚙️).")
         return _gemini_stream(model, messages, temperature, api_key, images or [])
+    if provider == "custom":
+        if not api_key:
+            raise LLMError("لا يوجد مفتاح API للمزود الاحتياطي — أدخله من الإعدادات (⚙️).")
+        if not (base_url or "").strip():
+            raise LLMError("المزود الاحتياطي يحتاج Base URL (مثل https://api.example.com/v1).")
+        return _openai_stream("custom", api_key, model, messages, temperature, images or [],
+                              base=base_url)
     if provider in OPENAI_BASES:
         if not api_key:
             raise LLMError(f"لا يوجد مفتاح API لمزود {provider} — أدخله من الإعدادات (⚙️).")
-        return _openai_stream(provider, api_key, model, messages, temperature, images or [])
+        return _openai_stream(provider, api_key, model, messages, temperature, images or [],
+                              base=base_url)
     raise LLMError(f"مزود غير معروف: {provider}")
 
 
@@ -313,6 +336,37 @@ def gemini_transcribe(data: bytes, mime: str, api_key: str, model: str = "gemini
         return "".join(p.get("text", "") for p in parts).strip()
     except Exception as e:
         raise LLMError(f"رد غير متوقع من Gemini: {e}") from e
+
+
+def gemini_extract_document(data: bytes, mime: str, api_key: str,
+                            model: str = "gemini-flash-lite-latest") -> str:
+    """استخراج نص من مستند ممسوح/صورة PDF عبر Gemini (OCR حقيقي) عند فشل pypdf."""
+    if not api_key:
+        raise LLMError("OCR يحتاج مفتاح Gemini مجاني في ⚙️ الإعدادات.")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": "Extract ALL readable text from this document exactly as written, preserving "
+                         "headings, tables (use | between cells), numbers and the original language. "
+                         "If it is a scanned document, perform OCR. Return only the extracted text."},
+                {"inlineData": {"mimeType": mime or "application/pdf",
+                                "data": base64.b64encode(data).decode("ascii")}},
+            ]
+        }],
+        "generationConfig": {"temperature": 0},
+    }
+    try:
+        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                       headers={"x-goog-api-key": api_key}, json=payload, timeout=180)
+    except httpx.HTTPError as e:
+        raise LLMError(f"تعذر الاتصال بخدمة Gemini لاستخراج المستند: {e}") from e
+    if r.status_code != 200:
+        raise LLMError(_friendly_error("Gemini OCR", r.status_code, r.text))
+    try:
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
+    except Exception as e:
+        raise LLMError(f"رد غير متوقع من Gemini OCR: {e}") from e
 
 
 def openrouter_embed(texts: list[str], model: str, keys: list[str] | str) -> list[list[float]] | None:

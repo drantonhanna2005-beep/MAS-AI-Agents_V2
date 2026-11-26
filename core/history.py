@@ -70,8 +70,13 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) 
 
 
 def _row_chat(r) -> dict:
-    return {"id": r[0], "title": r[1], "updated": r[2], "messages": r[3],
-            "pinned": bool(r[4]), "created": r[5], "share_id": r[6]}
+    d = {"id": r[0], "title": r[1], "updated": r[2], "messages": r[3],
+         "pinned": bool(r[4]), "created": r[5], "share_id": r[6]}
+    if len(r) > 7:
+        d["conversation_feedback"] = r[7]
+        d["conversation_feedback_at"] = r[8] if len(r) > 8 else None
+        d["conversation_feedback_dismissed"] = bool(r[9]) if len(r) > 9 and r[9] is not None else False
+    return d
 
 
 # ------------------------------------------------------------------ المحادثات
@@ -89,7 +94,8 @@ def list_chats() -> list[dict]:
         rows = _db().execute("""
             SELECT c.id, c.title, c.updated,
                    (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS n,
-                   c.pinned, c.created, c.share_id
+                   c.pinned, c.created, c.share_id,
+                   c.conversation_feedback, c.conversation_feedback_at, c.conversation_feedback_dismissed
             FROM chats c ORDER BY c.pinned DESC, c.updated DESC""").fetchall()
     return [_row_chat(r) for r in rows]
 
@@ -382,7 +388,8 @@ def branch_chat(chat_id: str, upto_id: int | None = None, title: str | None = No
 
 
 # ------------------------------------------------------------------ المشاركة العامة
-def create_share(chat_id: str, message_ids: list[int] | None = None, title: str | None = None, theme: str | None = None) -> dict | None:
+def create_share(chat_id: str, message_ids: list[int] | None = None, title: str | None = None,
+                 theme: str | None = None, lang: str | None = None) -> dict | None:
     with _lock:
         row = _db().execute("SELECT title FROM chats WHERE id=?", (chat_id,)).fetchone()
         if not row:
@@ -398,12 +405,17 @@ def create_share(chat_id: str, message_ids: list[int] | None = None, title: str 
         theme_norm = (theme or "").strip().lower()
         if theme_norm not in ("light", "dark"):
             theme_norm = "dark"
+        lang_norm = (lang or "").strip().lower()[:2]
+        if lang_norm not in ("ar", "en", "fr"):
+            lang_norm = "ar"
         payload = {
             "title": share_title,
             "created": time.time(),
             "theme": theme_norm,
+            "lang": lang_norm,
             "messages": [{"role": m["role"], "agent": m.get("agent"), "content": m["content"],
-                          "thinking": m.get("thinking"), "sources": m.get("sources") or [],
+                          "thinking": None,  # لا نشارك التفكير الداخلي في الروابط العامة
+                          "sources": m.get("sources") or [],
                           "created": m.get("created"), "edited_at": m.get("edited_at"),
                           "attachments": m.get("attachments") or [],
                           "status": m.get("status"), "error": m.get("error")}
@@ -415,7 +427,7 @@ def create_share(chat_id: str, message_ids: list[int] | None = None, title: str 
         _db().execute("UPDATE chats SET share_id=?, shared_at=? WHERE id=?",
                       (sid, time.time(), chat_id))
         _db().commit()
-    return {"id": sid, "title": share_title, "count": len(msgs), "theme": theme_norm}
+    return {"id": sid, "title": share_title, "count": len(msgs), "theme": theme_norm, "lang": lang_norm}
 
 
 def get_share(share_id: str) -> dict | None:
@@ -431,7 +443,30 @@ def get_share(share_id: str) -> dict | None:
         return None
     data["shared_at"] = row[1]
     data.setdefault("theme", "dark")
+    data.setdefault("lang", "ar")
     return data
+
+
+def revoke_share(chat_id: str) -> int:
+    """إلغاء كل روابط المشاركة للمحادثة: تُحذف اللقطات فوراً ويتوقف الرابط عن العمل."""
+    with _lock:
+        cur = _db().execute("DELETE FROM shares WHERE chat_id=?", (chat_id,))
+        _db().execute("UPDATE chats SET share_id=NULL, shared_at=NULL WHERE id=?", (chat_id,))
+        _db().commit()
+        return int(cur.rowcount or 0)
+
+
+def revoke_share_by_id(share_id: str) -> bool:
+    if not share_id or len(share_id) > 64:
+        return False
+    with _lock:
+        row = _db().execute("SELECT chat_id FROM shares WHERE id=?", (share_id,)).fetchone()
+        if not row:
+            return False
+        _db().execute("DELETE FROM shares WHERE id=?", (share_id,))
+        _db().execute("UPDATE chats SET share_id=NULL, shared_at=NULL WHERE id=? AND share_id=?", (row[0], share_id))
+        _db().commit()
+        return True
 
 
 # ------------------------------------------------------------------ المكتبة
