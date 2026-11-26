@@ -238,6 +238,23 @@ class CvPagesTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- انحدار مصدر الجامعة
+def _university_index_available() -> bool:
+    """فهرس مواد الجامعة بيانات خاصة لا تُرفع إلى Git.
+
+    عند غياب الفهرس (مثل CI أو استنساخ نظيف) نتخطى هذه الاختبارات
+    بدل الإبلاغ عن فشل غير حقيقي — لا نتائج مُفبركة ولا فشل مُضلِّل.
+    """
+    try:
+        return bool(university_ingest.load_university_chunks())
+    except Exception:
+        return False
+
+
+UNIVERSITY_INDEX = _university_index_available()
+SKIP_NO_INDEX = "فهرس مواد الجامعة غير موجود محلياً (بيانات خاصة غير مرفوعة) — يُعاد الاختبار بعد ingest"
+
+
+@unittest.skipUnless(UNIVERSITY_INDEX, SKIP_NO_INDEX)
 class UniversityIngestionRegressions(unittest.TestCase):
     """حالات انحدار مستمدة من نتائج المعالجة الفعلية لدليل الجامعة."""
 
