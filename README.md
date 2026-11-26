@@ -261,6 +261,36 @@ The FastAPI backend provides structured REST endpoints and an SSE stream:
 - **XSS & DOM Sanitization**: Frontend outputs are escaped and rendered through safe HTML parsers.
 - **Audit Compliance**: Designed to comply with academic privacy guidelines; conversations are stored exclusively on the user's host machine.
 
+
+---
+
+## 13. Providers, CI and Safe Publishing
+
+### Anthropic (Claude) provider
+Claude is supported as a first-class provider alongside Groq, OpenRouter, Gemini and Ollama.
+It can be configured two ways:
+
+- **UI**: Settings → Provider → `Anthropic Claude`, then paste the key and choose a model.
+- **Environment (recommended for deployment)**: `ANTHROPIC_API_KEY` (and optional `ANTHROPIC_BASE_URL`
+  for an OpenAI-compatible gateway). Environment variables override `config.json`, so no key is
+  ever committed to Git.
+
+Vision (images) is supported for all Claude models. Audio and video are handled by the existing
+speech-to-text (Whisper/Gemini) and frame-extraction pipelines — Claude does not accept raw audio/video.
+
+### Continuous integration
+`.github/workflows/ci.yml` runs on every push to `main`: Python/JS syntax checks, a backend import +
+database smoke test, the network-free unit tests (GPA, regressions, fallback) and a credential scan.
+
+### Publishing workflow
+See [PUBLISHING.md](PUBLISHING.md). A ready-made script performs preflight checks, runs the tests,
+scans for secrets, merges the remote safely (never force-pushes) and verifies that the remote SHA
+matches the local one:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/publish.ps1 -Message "feat: my change"
+```
+
 ---
 
 ## 📄 License
