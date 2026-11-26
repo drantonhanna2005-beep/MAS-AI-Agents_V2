@@ -181,10 +181,13 @@ ORCHESTRATOR_EN = {"id": "orchestrator", "emoji": "🧭", "name": "Smart Orchest
 
 def localized(agent: dict, lang: str = "ar") -> dict:
     """يعيد بطاقة الوكيل بلغة الواجهة مع الرجوع للعربية عند غياب الترجمة."""
-    if lang == "en" and agent.get("id") in AGENT_EN:
-        en = AGENT_EN[agent["id"]]
-        return {**agent, "name": en["name"], "role": en["role"], "description": en["description"]}
-    return agent
+    if (lang or "").strip().lower()[:2] == "en":
+        if agent.get("id") == "orchestrator":
+            return {**agent, "name": ORCHESTRATOR_EN["name"], "role": ORCHESTRATOR_EN["role"], "description": ORCHESTRATOR_EN["description"]}
+        if agent.get("id") in AGENT_EN:
+            en = AGENT_EN[agent["id"]]
+            return {**agent, "name": en["name"], "role": en["role"], "description": en["description"]}
+    return agent.copy()
 
 
 AGENT_MAP = {a["id"]: a for a in AGENTS}

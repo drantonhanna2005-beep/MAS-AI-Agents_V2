@@ -57,7 +57,7 @@ _T = {
 
 
 def _grade_points(grade: str, points, scale: str) -> float | None:
-    if points is not None:
+    if points is not None and str(points).strip() != "":
         try:
             p = float(norm_digits(points))
             return p if 0 <= p <= _MAX_POINTS[scale] else None
@@ -152,21 +152,24 @@ def calc(rows: list[dict], scale: str = "egypt5",
         "gpa": gpa, "term_hours": total_hours, "percentage": percentage,
         "label": _label(percentage, lang), "table": table_rows, "errors": errors,
     }
-    if previous_gpa is not None and previous_hours:
+    if previous_gpa is not None and previous_hours is not None:
         try:
             pg, ph = float(norm_digits(previous_gpa)), float(norm_digits(previous_hours))
             if not (0 <= pg <= _MAX_POINTS[scale]) or ph <= 0:
                 errors.append(t["err_prev"].format(p=pg, m=_MAX_POINTS[scale]))
+            elif ph <= 0:
+                errors.append(t["err_hours"])
             else:
                 cum = (pg * ph + total_points) / (ph + total_hours)
+                cum_pct = round(cum / _MAX_POINTS[scale] * 100, 1)
                 result["cumulative"] = {
                     "gpa": round(cum, 2),
-                    "percentage": round(cum / _MAX_POINTS[scale] * 100, 1),
-                    "label": _label(cum / _MAX_POINTS[scale] * 100, lang),
+                    "percentage": cum_pct,
+                    "label": _label(cum_pct, lang),
                     "total_hours": ph + total_hours,
                 }
-        except Exception:
-            pass
+        except (ValueError, TypeError):
+            errors.append(t["err_prev"].format(p=previous_gpa, m=_MAX_POINTS[scale]))
     return result
 
 
@@ -185,5 +188,6 @@ def to_markdown(res: dict, lang: str = "ar") -> str:
         lines.append(f"**{t['cum']}: {c['gpa']}** ≈ {c['percentage']}% — {c['label']} "
                      f"({t['on']} {c['total_hours']:g} {t['hours_w']})")
     if res.get("errors"):
-        lines += ["", f"⚠️ {t['notes']}: " + " ، ".join(res["errors"])]
+        sep = " ، " if lang == "ar" else ", "
+        lines += ["", f"⚠️ {t['notes']}: " + sep.join(res["errors"])]
     return "\n".join(lines)

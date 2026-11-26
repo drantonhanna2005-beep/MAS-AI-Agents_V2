@@ -18,13 +18,20 @@ from . import extract
 
 CHUNK_CHARS = 1100
 CHUNK_OVERLAP = 180
-MAX_EMBED_CHUNKS = 4000
 
 _ar_marks = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u0640]")
 _word_re = re.compile(r"[A-Za-z0-9_]+|[\u0600-\u06FF]+")
 
 _lock = threading.Lock()
-_state: dict = {"docs": [], "bm25": None, "vectors": None, "embed_model": None, "mtime": 0.0, "building": False}
+_state: dict = {
+    "docs": [],
+    "bm25": None,
+    "vectors": None,
+    "embed_model": None,
+    "mtime": 0.0,
+    "building": False,
+    "title_tok": [],
+}
 
 
 # ---------------------------------------------------------------- التطبيع والتجزئة
@@ -37,10 +44,10 @@ def normalize_ar(text: str) -> str:
 
 def _stem(w: str) -> str:
     """تجذير خفيف للعربية (بدون مكتبات): يزيل أدوات التعريف والوصل واللواحق الشائعة."""
-    if len(w) > 4 and w.startswith("ال"):
-        w = w[2:]
     while len(w) > 3 and w[0] in "وفبلك":
         w = w[1:]
+    if len(w) > 4 and w.startswith("ال"):
+        w = w[2:]
     for suf in ("ات", "ون", "ين", "ية", "ها", "هم", "هن", "كم"):
         if len(w) > 4 and w.endswith(suf):
             w = w[: -len(suf)]
@@ -162,12 +169,11 @@ def build_index(progress=None) -> dict:
         seen: set = set()
         uniq: list[dict] = []
         for d in docs:
-            hk = hash((d.get("title", ""), d["text"][:200]))
+            hk = (d.get("source", ""), d.get("title", ""), d.get("text", ""))
             if hk in seen:
                 continue
             seen.add(hk)
             uniq.append(d)
-        docs = uniq
         docs = uniq
 
         # ---- Embeddings تزايدية: كاش حسب بصمة النص — إعادة الفهرسة تضيف الجديد فقط (تحصين ضد 429)
@@ -236,7 +242,7 @@ def build_index(progress=None) -> dict:
 def _load_index(force: bool = False) -> None:
     path = INDEX_DIR / "chunks.json"
     if not path.exists():
-        _state.update({"docs": [], "bm25": None, "vectors": None, "mtime": 0.0})
+        _state.update({"docs": [], "bm25": None, "vectors": None, "mtime": 0.0, "title_tok": []})
         return
     mtime = path.stat().st_mtime
     if not force and mtime == _state.get("mtime"):
@@ -249,12 +255,19 @@ def _load_index(force: bool = False) -> None:
         _state.update({"docs": docs, "bm25": bm25, "vectors": payload.get("vectors"),
                        "embed_model": payload.get("embed_model"), "mtime": mtime,
                        "title_tok": title_tok})
-    except Exception:
-        _state.update({"docs": [], "bm25": None, "vectors": None, "mtime": 0.0})
+    except Exception as e:
+        import logging
+        logging.getLogger("rag").warning(f"Failed to load index from {path}: {e}")
+        _state.update({"docs": [], "bm25": None, "vectors": None, "mtime": 0.0, "title_tok": []})
 
 
 def fill_embeddings() -> dict:
     """شفاء ذاتي: يكمل vectors الناقصة فقط (كاش حسب بصمة النص) — بعد انتهاء 429."""
+    global _state
+    with _lock:
+        if _state.get("building"):
+            return {"busy": True}
+        _state["building"] = True
     try:
         path = INDEX_DIR / "chunks.json"
         if not path.exists():
@@ -277,7 +290,7 @@ def fill_embeddings() -> dict:
             payload["embeddings"] = {"model": emb_model, "map": emap}
             payload["vectors"] = [emap.get(h) for h in hashes]
             payload["embed_model"] = emb_model
-            tmp = INDEX_DIR / "chunks.json.tmp"
+            tmp = INDEX_DIR / f"chunks_{int(time.time() * 1000)}.tmp"
             tmp.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
             import os
             os.replace(tmp, path)
@@ -312,7 +325,7 @@ def fill_embeddings() -> dict:
         payload["embeddings"] = {"model": emb_model, "map": emap}
         payload["vectors"] = [emap.get(h) for h in hashes]
         payload["embed_model"] = emb_model
-        tmp = INDEX_DIR / "chunks.json.tmp"
+        tmp = INDEX_DIR / f"chunks_{int(time.time() * 1000)}.tmp"
         tmp.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
         import os
         os.replace(tmp, path)
@@ -320,6 +333,9 @@ def fill_embeddings() -> dict:
         return {"skipped": False, "semantic": True}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        with _lock:
+            _state["building"] = False
 
 
 def is_building() -> bool:
@@ -346,39 +362,17 @@ def _embed_engine() -> tuple[str, str]:
     if want == "ollama":
         url = cfg.get("ollama_url", "").rstrip("/")
         if url and _ollama_models(url):
-            return ("ollama", emb.get("embed_model") or cfg.get("embed_model") or "nomic-embed-text")
+            model = emb.get("model") or emb.get("embed_model") or cfg.get("embed_model") or "nomic-embed-text"
+            return ("ollama", model)
         return ("none", "")
     # auto: Ollama أولاً (محلي وأسرع) وإلا OpenRouter مجاناً
     url = cfg.get("ollama_url", "").rstrip("/")
     if url and _ollama_models(url):
-        return ("ollama", emb.get("embed_model") or cfg.get("embed_model") or "nomic-embed-text")
+        model = emb.get("model") or emb.get("embed_model") or cfg.get("embed_model") or "nomic-embed-text"
+        return ("ollama", model)
     if or_key:
         return ("openrouter", or_model)
     return ("none", "")
-
-
-def _try_embed(texts: list[str]) -> list[list[float]] | None:
-    engine, model = _embed_engine()
-    if engine == "none" or len(texts) > MAX_EMBED_CHUNKS:
-        return None
-    if engine == "ollama":
-        from core.config import load_config
-        url = load_config().get("ollama_url", "").rstrip("/")
-        try:
-            import httpx
-            r = httpx.post(url + "/api/embed", json={"model": model, "input": texts[:MAX_EMBED_CHUNKS]}, timeout=600)
-            if r.status_code == 200:
-                embs = r.json().get("embeddings")
-                if embs and len(embs) == min(len(texts), MAX_EMBED_CHUNKS):
-                    return embs
-        except Exception:
-            pass
-        return None
-    from core.config import load_config, get_model_key
-    from core.llm import openrouter_embed
-    cfg = load_config()
-    keys = [get_model_key("openrouter", model, cfg), cfg.get("api_keys", {}).get("openrouter", "")]
-    return openrouter_embed(texts[:MAX_EMBED_CHUNKS], model, keys)
 
 
 def _embed_query(text: str) -> list[float] | None:
@@ -391,9 +385,11 @@ def _embed_query(text: str) -> list[float] | None:
         url = cfg.get("ollama_url", "").rstrip("/")
         try:
             import httpx
-            r = httpx.post(url + "/api/embeddings", json={"model": model, "prompt": text}, timeout=30)
+            r = httpx.post(url + "/api/embed", json={"model": model, "input": [text]}, timeout=30)
             if r.status_code == 200:
-                return r.json().get("embedding")
+                embs = r.json().get("embeddings")
+                if embs:
+                    return embs[0]
         except Exception:
             pass
         return None

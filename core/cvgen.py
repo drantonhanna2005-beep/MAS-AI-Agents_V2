@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from .config import UPLOAD_DIR
@@ -80,13 +82,30 @@ ACCENTS = {
 def _norm_items(seq):
     """توحيد إدخالات القوائم (تعليم/خبرات/مشروعات): النص البسيط يصبح قاموساً
     والأنواع غير المدعومة تُتجاهل — يمنع انهيار التحليل أو توليد CV على أي إدخال."""
+    if not seq:
+        return []
+    if isinstance(seq, (str, dict)):
+        seq = [seq]
+    elif not isinstance(seq, (list, tuple, set)):
+        return []
     out = []
-    for e in (seq or []):
+    for e in seq:
         if isinstance(e, str):
             e = {"title": e, "name": e}
         if isinstance(e, dict):
             out.append(e)
     return out
+
+
+def _norm_bullets(val) -> list[str]:
+    """توحيد bullets بحيث لو كانت نصاً منفرداً تصبح قائمة، ولا تتفكك حرفاً بحرف."""
+    if not val:
+        return []
+    if isinstance(val, str):
+        val = [val]
+    elif not isinstance(val, (list, tuple, set)):
+        return [str(val)]
+    return [str(b) for b in val if _clean(b)]
 
 
 def analyze(profile: dict, track: str = "General", lang: str = "ar") -> dict:
@@ -118,8 +137,8 @@ def analyze(profile: dict, track: str = "General", lang: str = "ar") -> dict:
     add("skills", min(1.0, len(skills) / 8), 10)
 
     kws = TRACK_KEYWORDS[track]
-    found = [k for k in kws if any(k in s for s in skills)] or \
-            [k for k in kws if k in (str(profile.get("summary") or "") + " " + str(profile.get("extra") or "")).lower()]
+    summary_extra = (str(profile.get("summary") or "") + " " + str(profile.get("extra") or "")).lower()
+    found = [k for k in kws if any(k in s for s in skills) or k in summary_extra]
     coverage = len(found) / len(kws)
     name, tip = t["keywords"]
     sep = "، " if lang == "ar" else ", "
@@ -131,7 +150,7 @@ def analyze(profile: dict, track: str = "General", lang: str = "ar") -> dict:
 
     bullets: list[str] = []
     for e in _norm_items(profile.get("experience")) + _norm_items(profile.get("projects")):
-        bl = e.get("bullets") or ([e.get("details")] if e.get("details") else [])
+        bl = _norm_bullets(e.get("bullets")) or ([e.get("details")] if e.get("details") else [])
         bullets.extend([str(b) for b in bl if b])
     quant = sum(1 for b in bullets if re.search(r"\d+\s*(%|ساعة|طالب|مستخدم|مريض|user|accuracy|x)", str(b), re.I))
     add("quant", min(1.0, quant / 3), 10)
@@ -226,25 +245,31 @@ def render_html(profile: dict, lang: str = "ar", theme: dict | None = None) -> s
         return f'<section{st}><h2>{sec[key]}</h2>{items_html}</section>'
 
     edu = "".join(
-        f'<div class="item"><div class="row"><b>{_esc(e.get("degree"))}</b>'
+        f'<div class="item"><div class="row"><b>{_esc(e.get("degree") or e.get("title") or e.get("name"))}</b>'
         f'<span class="when">{_esc(e.get("year"))}</span></div>'
         f'<div class="sub">{_esc(e.get("institution"))}'
         + (f' — {_esc(e.get("details"))}' if _clean(e.get("details")) else "") + "</div></div>"
         for e in _norm_items(profile.get("education")))
     exp = ""
     for e in _norm_items(profile.get("experience")):
-        bullets = "".join(f"<li>{_esc(b)}</li>" for b in (e.get("bullets") or []))
+        bullets_list = _norm_bullets(e.get("bullets"))
+        bullets = "".join(f"<li>{_esc(b)}</li>" for b in bullets_list)
+        details_html = f'<div class="sub">{_esc(e.get("details"))}</div>' if _clean(e.get("details")) else ""
         exp += (f'<div class="item"><div class="row"><b>{_esc(e.get("role"))}</b>'
                 f'<span class="when">{_esc(e.get("period"))}</span></div>'
                 f'<div class="sub">{_esc(e.get("company"))}</div>'
-                f'<ul>{bullets}</ul></div>')
+                + details_html
+                + (f'<ul>{bullets}</ul>' if bullets else '') + '</div>')
     proj = ""
     for p in _norm_items(profile.get("projects")):
-        bullets = "".join(f"<li>{_esc(b)}</li>" for b in (p.get("bullets") or []))
+        bullets_list = _norm_bullets(p.get("bullets"))
+        bullets = "".join(f"<li>{_esc(b)}</li>" for b in bullets_list)
         tech = _esc(p.get("tech"))
+        details_html = f'<div class="sub">{_esc(p.get("details"))}</div>' if _clean(p.get("details")) else ""
         proj += (f'<div class="item"><div class="row"><b>{_esc(p.get("name"))}</b>'
-                 f'<span class="when">{tech}</span></div>'
-                 f'<ul>{bullets}</ul></div>')
+                f'<span class="when">{tech}</span></div>'
+                + details_html
+                + (f'<ul>{bullets}</ul>' if bullets else '') + '</div>')
     skills_html = ""
     skills = [_esc(s) for s in (profile.get("skills") or []) if _clean(s)]
     if skills:
@@ -329,41 +354,43 @@ def render_html(profile: dict, lang: str = "ar", theme: dict | None = None) -> s
 
 def html_to_pdf(html: str, out_pdf: Path) -> bool:
     """يحوّل HTML إلى PDF حقيقي عبر Edge/Chrome headless. يرجع True عند النجاح."""
-    tmp_html = UPLOAD_DIR / f"cv_print_{int(time.time() * 1000)}.html"
-    tmp_html.write_text(html, encoding="utf-8")
-    url = tmp_html.as_uri()
-    out_pdf = Path(out_pdf)
-    candidates = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
-    profile_dir = UPLOAD_DIR / "_pdf_profile"
-    profile_dir.mkdir(exist_ok=True)
-    for exe in candidates:
-        if not Path(exe).exists():
-            continue
+    tmp_html = UPLOAD_DIR / f"cv_print_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.html"
+    try:
+        tmp_html.write_text(html, encoding="utf-8")
+        url = tmp_html.as_uri()
+        out_pdf = Path(out_pdf)
+        candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        with tempfile.TemporaryDirectory(dir=str(UPLOAD_DIR)) as profile_dir:
+            for exe in candidates:
+                if not Path(exe).exists():
+                    continue
+                try:
+                    subprocess.run(
+                        [exe, "--headless=new", "--disable-gpu", "--no-first-run",
+                         f"--user-data-dir={profile_dir}",
+                         "--no-pdf-header-footer", "--print-to-pdf-no-header",
+                         f"--print-to-pdf={out_pdf}",
+                         "--virtual-time-budget=8000",
+                         url],
+                        timeout=45, check=False,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    continue
+                if out_pdf.exists() and out_pdf.stat().st_size > 8000:
+                    return True
+        return False
+    finally:
         try:
-            subprocess.run(
-                [exe, "--headless=new", "--disable-gpu", "--no-first-run",
-                 f"--user-data-dir={profile_dir}",
-                 "--no-pdf-header-footer", "--print-to-pdf-no-header",
-                 f"--print-to-pdf={out_pdf}",
-                 "--virtual-time-budget=8000",
-                 url],
-                timeout=45, check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            continue
-        if out_pdf.exists() and out_pdf.stat().st_size > 8000:
-            try:
+            if tmp_html.exists():
                 tmp_html.unlink()
-            except Exception:
-                pass
-            return True
-    return False
+        except Exception:
+            pass
 
 
 def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> Path:
@@ -385,11 +412,15 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
     for s in d.sections:
         s.top_margin = Cm(1.6 + 0.3 * _dens); s.bottom_margin = Cm(1.6 + 0.3 * _dens)
         s.left_margin = Cm(1.8 + 0.2 * _dens); s.right_margin = Cm(1.8 + 0.2 * _dens)
-    accent_rgb = RGBColor(0x1A, 0x36, 0x5D)
+    accent_hex = th["accent"].lstrip("#")
+    accent_rgb = RGBColor(int(accent_hex[0:2], 16), int(accent_hex[2:4], 16), int(accent_hex[4:6], 16))
 
     def _font(run, size=11, bold=False, color=None):
-        run.font.name = "Cairo" if rtl else "Calibri"
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Cairo" if rtl else "Calibri")
+        font_name = "Cairo" if rtl else "Calibri"
+        run.font.name = font_name
+        rFonts = run._element.rPr.rFonts
+        rFonts.set(qn("w:eastAsia"), font_name)
+        rFonts.set(qn("w:cs"), font_name)
         run.font.size = Pt(size)
         run.bold = bold
         if color:
@@ -401,8 +432,10 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
 
     def _p(text="", size=11, bold=False, color=None, align_right=False, space_after=4):
         p = d.add_paragraph()
-        if rtl or align_right:
+        if rtl:
             _rtl_p(p)
+        elif align_right:
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         if text:
             run = p.add_run(text)
             _font(run, size=size, bold=bold, color=color)
@@ -414,8 +447,7 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         pPr = p._p.get_or_add_pPr()
         bidi = OxmlElement("w:bidi")
         pPr.append(bidi)
-        if rtl:
-            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     def _heading(text):
         p = _p(text, size=13, bold=True, color=accent_rgb, space_after=6)
@@ -426,7 +458,7 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         bottom.set(qn("w:val"), "single")
         bottom.set(qn("w:sz"), "12")
         bottom.set(qn("w:space"), "1")
-        bottom.set(qn("w:color"), "1A365D")
+        bottom.set(qn("w:color"), accent_hex.upper())
         pBdr.append(bottom)
         pPr.append(pBdr)
         return p
@@ -447,37 +479,16 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         _heading("الملخص المهني" if rtl else "Summary")
         _p(_clean(profile.get("summary")), size=11)
 
-    def _bullets_section(title_ar_en, items):
-        items = _norm_items(items)
-        if not items:
-            return
-        _heading(title_ar_en)
-        for it in items:
-            head = " — ".join(x for x in [it.get("role") or it.get("degree") or it.get("name"),
-                                           it.get("company") or it.get("institution") or it.get("tech"),
-                                           it.get("period") or it.get("year")] if _clean(x))
-            if head:
-                _p(head, size=11, bold=True, space_after=1)
-            for b in it.get("bullets") or []:
-                p = d.add_paragraph(style="List Bullet")
-                if rtl:
-                    _rtl_p(p)
-                run = p.add_run(_clean(b))
-                _font(run, size=11)
-                p.paragraph_format.space_after = Pt(2)
-            if it.get("details") and not it.get("bullets"):
-                _p(_clean(it.get("details")), size=11)
-
-    if _clean(profile.get("summary")):
-        pass
     if profile.get("education"):
         if pages >= 4:
             d.add_page_break()
         _heading("التعليم" if rtl else "Education")
         for e in _norm_items(profile.get("education")):
-            line = " — ".join(x for x in [_clean(e.get("degree")), _clean(e.get("institution")),
+            deg = _clean(e.get("degree") or e.get("title") or e.get("name"))
+            line = " — ".join(x for x in [deg, _clean(e.get("institution")),
                                           _clean(e.get("year")), _clean(e.get("details"))] if x)
-            _p(line, size=11, bold=False, space_after=3)
+            if line:
+                _p(line, size=11, bold=False, space_after=3)
     if profile.get("experience"):
         if pages >= 2:
             d.add_page_break()  # فاصل منطقي: الخبرات في صفحة جديدة عند 2+ صفحات
@@ -485,28 +496,36 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         for e in _norm_items(profile.get("experience")):
             head = " — ".join(x for x in [_clean(e.get("role")), _clean(e.get("company")),
                                           _clean(e.get("period"))] if x)
-            _p(head, size=11, bold=True, space_after=1)
-            for b in e.get("bullets") or []:
+            if head:
+                _p(head, size=11, bold=True, space_after=1)
+            bullets_list = _norm_bullets(e.get("bullets"))
+            for b in bullets_list:
                 p = d.add_paragraph(style="List Bullet")
                 if rtl:
                     _rtl_p(p)
                 run = p.add_run(_clean(b))
                 _font(run, size=11)
                 p.paragraph_format.space_after = Pt(2)
+            if e.get("details") and not bullets_list:
+                _p(_clean(e.get("details")), size=11)
     if profile.get("projects"):
         if pages >= 3:
             d.add_page_break()  # المشروعات في صفحة جديدة عند 3+ صفحات
         _heading("المشروعات" if rtl else "Projects")
         for p_ in _norm_items(profile.get("projects")):
             head = " — ".join(x for x in [_clean(p_.get("name")), _clean(p_.get("tech"))] if x)
-            _p(head, size=11, bold=True, space_after=1)
-            for b in p_.get("bullets") or []:
+            if head:
+                _p(head, size=11, bold=True, space_after=1)
+            bullets_list = _norm_bullets(p_.get("bullets"))
+            for b in bullets_list:
                 p = d.add_paragraph(style="List Bullet")
                 if rtl:
                     _rtl_p(p)
                 run = p.add_run(_clean(b))
                 _font(run, size=11)
                 p.paragraph_format.space_after = Pt(2)
+            if p_.get("details") and not bullets_list:
+                _p(_clean(p_.get("details")), size=11)
     if profile.get("skills"):
         if pages >= 5:
             d.add_page_break()
@@ -523,13 +542,6 @@ def render_docx(profile: dict, lang: str = "ar", theme: dict | None = None) -> P
         _heading("اللغات" if rtl else "Languages")
         _p(", ".join(_clean(s) for s in profile.get("languages") or []), size=11)
 
-    # هوامش
-    for s in d.sections:
-        s.top_margin = Cm(1.6)
-        s.bottom_margin = Cm(1.6)
-        s.left_margin = Cm(1.8)
-        s.right_margin = Cm(1.8)
-
-    out = UPLOAD_DIR / f"CV_{int(time.time())}.docx"
+    out = UPLOAD_DIR / f"CV_{int(time.time())}_{uuid.uuid4().hex[:8]}.docx"
     d.save(str(out))
     return out

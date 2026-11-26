@@ -61,7 +61,11 @@ DEFAULT_CONFIG: dict = {
 def get_model_key(provider: str, model: str, cfg: dict) -> str:
     """مفتاح النموذج: مفتاح خاص بالنموذج (model_keys) إن وجد وإلا مفتاح المزود."""
     mk = (cfg.get("model_keys") or {}).get(provider) or {}
-    return (mk.get(model) or cfg.get("api_keys", {}).get(provider, "")).strip()
+    key = mk.get(model) if isinstance(mk, dict) else None
+    if not key:
+        api_keys = cfg.get("api_keys") or {}
+        key = api_keys.get(provider, "") if isinstance(api_keys, dict) else ""
+    return str(key or "").strip()
 
 
 def get_fallback(cfg: dict) -> dict | None:
@@ -113,9 +117,10 @@ def load_config() -> dict:
             user = json.loads(CONFIG_PATH.read_text("utf-8"))
             for k, v in user.items():
                 if v is not None:
-                    cfg[k] = v
-            if isinstance(user.get("api_keys"), dict):
-                cfg["api_keys"].update({k: v for k, v in user["api_keys"].items() if v})
+                    if isinstance(cfg.get(k), dict) and isinstance(v, dict):
+                        cfg[k].update(v)
+                    else:
+                        cfg[k] = v
         except Exception:
             pass  # ملف تالف → نرجع للإعدادات الافتراضية
     # مفاتيح من متغيرات البيئة تتجاوز الملف (للنشر على منصات مثل Railway/Render)
@@ -153,21 +158,28 @@ def _ollama_models(url: str) -> list[str] | None:
 
 def pick_ollama_model(models: list[str], wanted: str) -> str:
     """يختار أفضل موديل متاح: المطلوب إن وجد، وإلا أقرب موديل مناسب."""
-    if not models:
+    valid_models = [m for m in (models or []) if isinstance(m, str) and m]
+    if not valid_models:
         return wanted or ""
-    if wanted and any(m == wanted or m.startswith(wanted + ":") for m in models):
-        return next(m for m in models if m == wanted or m.startswith(wanted + ":"))
+    if wanted and any(m == wanted or m.startswith(wanted + ":") for m in valid_models):
+        return next(m for m in valid_models if m == wanted or m.startswith(wanted + ":"))
+    wanted_base = wanted.split(":")[0] if wanted else ""
+    if wanted_base:
+        base_hit = [m for m in valid_models if m == wanted_base or m.startswith(wanted_base + ":") or wanted_base in m.lower()]
+        if base_hit:
+            return sorted(base_hit)[-1]
     for pref in ("llama3.1", "llama3.2", "qwen2.5", "mistral", "gemma", "llama3", "phi"):
-        hit = [m for m in models if pref in m.lower()]
+        hit = [m for m in valid_models if pref in m.lower()]
         if hit:
             return sorted(hit)[-1]
-    return models[0]
+    return valid_models[0]
 
 
 def resolve_provider(cfg: dict) -> dict:
     """يحدد المزود الفعلي المستخدم حسب الإعدادات والتوفر اللحظي."""
     want = (cfg.get("provider") or "auto").lower()
-    keys = cfg.get("api_keys", {})
+    keys = cfg.get("api_keys") or {}
+    main_models = cfg.get("main_models") or DEFAULT_CONFIG["main_models"]
     ollama_url = cfg.get("ollama_url", DEFAULT_CONFIG["ollama_url"])
     ollama_models = _ollama_models(ollama_url) or []
     ollama_up = bool(ollama_models)
@@ -175,7 +187,7 @@ def resolve_provider(cfg: dict) -> dict:
     order = [want] if want != "auto" else ["ollama", "groq", "anthropic", "openrouter", "gemini"]
     for p in order:
         if p == "ollama" and ollama_up:
-            model = pick_ollama_model(ollama_models, cfg["main_models"].get("ollama", ""))
+            model = pick_ollama_model(ollama_models, main_models.get("ollama", ""))
             return {"provider": "ollama", "model": model, "available_models": ollama_models,
                     "ollama_url": ollama_url}
         if p == "groq" and keys.get("groq"):
@@ -185,7 +197,8 @@ def resolve_provider(cfg: dict) -> dict:
         if p == "anthropic" and keys.get("anthropic"):
             return {"provider": "anthropic", "model": cfg["main_models"].get("anthropic") or "claude-sonnet-4-6", "available_models": []}
         if p == "gemini" and keys.get("gemini"):
-            return {"provider": "gemini", "model": cfg["main_models"]["gemini"], "available_models": []}
+            gemini_model = main_models.get("gemini") or DEFAULT_CONFIG["main_models"]["gemini"]
+            return {"provider": "gemini", "model": gemini_model, "available_models": ollama_models}
 
     return {"provider": "offline", "model": "—", "available_models": ollama_models,
             "ollama_up": ollama_up, "ollama_url": ollama_url}
@@ -199,11 +212,8 @@ def provider_supports_vision(provider: str, model: str) -> bool:
         # كل موديلات Claude الحديثة تدعم الرؤية (صور)
         return m.startswith("claude")
     if provider == "ollama":
-        return any(k in m for k in ("llava", "vision", "bakllava", "moondream", "minicpm-v", "llama3.2-vision", "gemma3", "qwen2.5vl", "qwen-vl", "phi3.5-vision", "phi4-multimodal"))
+        return any(k in m for k in ("llava", "vision", "bakllava", "moondream", "minicpm-v", "llama3.2-vision", "gemma3", "gemma4", "qwen2.5vl", "qwen-vl", "phi3.5-vision", "phi4-multimodal"))
     # broad heuristic for OpenAI-compatible providers; allow common vision-capable families
     if any(k in m for k in ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-5", "omni", "vision", "4v", "claude-3", "claude-sonnet-4", "claude-opus-4", "claude-haiku-4", "llama-3.2-vision", "llama-4", "scout", "maverick", "pixtral", "qwen-vl", "qwen2.5-vl", "qwen2-vl", "gemini", "gemma-4", "gemma-3", "gemma-2", "internvl", "minicpm-v", "moondream")):
         return True
-    if provider in ("openai", "azure", "openrouter", "groq", "together", "fireworks", "deepinfra", "mistral"):
-        # conservative default false for unknown text-only models on these providers
-        return False
     return False

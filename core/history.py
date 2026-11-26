@@ -135,9 +135,10 @@ def set_pinned(chat_id: str, pinned: bool) -> bool:
 
 def delete_chat(chat_id: str) -> None:
     with _lock:
+        _db().execute("DELETE FROM message_versions WHERE chat_id=?", (chat_id,))
         _db().execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
         _db().execute("DELETE FROM shares WHERE chat_id=?", (chat_id,))
-        _db().execute("UPDATE library SET chat_id=NULL WHERE chat_id=?", (chat_id,))
+        _db().execute("UPDATE library SET chat_id=NULL, message_id=NULL WHERE chat_id=?", (chat_id,))
         _db().execute("DELETE FROM chats WHERE id=?", (chat_id,))
         _db().commit()
 
@@ -190,7 +191,7 @@ def _row_msg(r) -> dict:
         "feedback": r[7] if len(r) > 7 else None,
         "attachments": _loads_json(r[8] if len(r) > 8 else None, []),
         "edited_at": r[9] if len(r) > 9 else None,
-        "status": r[10] if len(r) > 10 else "ok",
+        "status": (r[10] if len(r) > 10 and r[10] is not None else "ok"),
         "error": r[11] if len(r) > 11 else None,
     }
 
@@ -377,11 +378,12 @@ def branch_chat(chat_id: str, upto_id: int | None = None, title: str | None = No
         new_id = create_chat(new_title)
         for m in msgs:
             _db().execute(
-                "INSERT INTO messages(chat_id,role,agent,content,thinking,sources,created,feedback,attachments) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages(chat_id,role,agent,content,thinking,sources,created,feedback,attachments,edited_at,status,error) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (new_id, m["role"], m.get("agent"), m["content"], m.get("thinking"),
                  json.dumps(m.get("sources") or [], ensure_ascii=False), m["created"],
-                 m.get("feedback"), json.dumps(m.get("attachments") or [], ensure_ascii=False)))
+                 m.get("feedback"), json.dumps(m.get("attachments") or [], ensure_ascii=False),
+                 m.get("edited_at"), m.get("status") or "ok", m.get("error")))
         _db().execute("UPDATE chats SET updated=? WHERE id=?", (time.time(), new_id))
         _db().commit()
     return new_id
@@ -489,10 +491,12 @@ def _kind_of(mime: str, name: str) -> str:
     ext = (name.rsplit(".", 1)[-1] if "." in name else "").lower()
     if m.startswith("image/") or ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic"):
         return "image"
-    if m.startswith("audio/") or ext in ("mp3", "wav", "m4a", "ogg", "webm", "aac", "flac"):
-        return "audio"
-    if m.startswith("video/") or ext in ("mp4", "mov", "avi", "mkv", "webm"):
+    if m.startswith("video/") or ext in ("mp4", "mov", "avi", "mkv"):
         return "video"
+    if m.startswith("audio/") or ext in ("mp3", "wav", "m4a", "ogg", "aac", "flac"):
+        return "audio"
+    if ext == "webm":
+        return "audio" if m.startswith("audio/") else "video"
     return "document"
 
 
@@ -513,8 +517,9 @@ def get_library_item(lid: str) -> dict | None:
 
 def list_library(q: str = "", kind: str = "", limit: int = 300) -> list[dict]:
     where, params = [], []
-    if q.strip():
-        like = f"%{q.strip()}%"
+    q_str = (q or "").strip()
+    if q_str:
+        like = f"%{q_str}%"
         where.append("(l.name LIKE ? OR l.text LIKE ? OR c.title LIKE ?)")
         params += [like, like, like]
     if kind and kind not in ("all", "*"):
@@ -533,13 +538,13 @@ def list_library(q: str = "", kind: str = "", limit: int = 300) -> list[dict]:
 
 
 def delete_library_item(lid: str) -> dict | None:
-    item = get_library_item(lid)
-    if not item:
-        return None
     with _lock:
-        _db().execute("DELETE FROM library WHERE id=?", (lid,))
+        item = get_library_item(lid)
+        if not item:
+            return None
+        cur = _db().execute("DELETE FROM library WHERE id=?", (lid,))
         _db().commit()
-    return item
+        return item if cur.rowcount > 0 else None
 
 
 def link_library(ids: list[str], chat_id: str, message_id: int | None = None) -> None:

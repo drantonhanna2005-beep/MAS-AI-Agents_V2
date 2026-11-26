@@ -4,13 +4,19 @@ from __future__ import annotations
 import re
 import urllib.parse
 
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore
+
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
 
 def _unwrap(url: str) -> str:
-    m = re.search(r"uddg=([^&]+)", url)
-    if m:
-        return urllib.parse.unquote(m.group(1))
+    if "uddg=" in url and ("/l/?" in url or "duckduckgo.com" in url):
+        m = re.search(r"[?&]uddg=([^&]+)", url)
+        if m:
+            return urllib.parse.unquote(m.group(1))
     return url
 
 
@@ -20,7 +26,8 @@ def _strip_tags(s: str) -> str:
 
 def duck_search(query: str, n: int = 5) -> list[dict]:
     """يرجع نتائج [{title, url, snippet}] أو [] عند أي فشل."""
-    import httpx
+    if not query or not isinstance(query, str) or httpx is None:
+        return []
     for endpoint in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
         try:
             r = httpx.post(endpoint, data={"q": query}, headers=_UA, timeout=12, follow_redirects=True)
@@ -29,22 +36,59 @@ def duck_search(query: str, n: int = 5) -> list[dict]:
             text = r.text
             results: list[dict] = []
             if endpoint.endswith("lite/"):
-                rows = re.findall(r'<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text)
+                # Use lookahead or flexible attribute ordering with re.S flag
+                # matches <a ... rel="nofollow" ... href="..." ...>title</a> or href before rel
+                rows = re.findall(
+                    r'<a\b(?=[^>]*?\brel=["\']nofollow["\'])(?=[^>]*?\bhref=["\']([^"\']+)["\'])[^>]*>(.*?)</a>',
+                    text,
+                    re.S,
+                )
                 for url, title in rows:
                     u = _unwrap(url)
                     if not u.startswith("http"):
                         continue
                     results.append({"title": _strip_tags(title) or u, "url": u, "snippet": ""})
             else:
-                blocks = re.findall(
-                    r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text, re.S)
-                snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', text, re.S)
-                for i, (url, title) in enumerate(blocks):
+                # Extract per-block using result container blocks or combined regex
+                # DuckDuckGo HTML wraps results in class="result ..." or "results_links"
+                # Within each result block, link has class="result__a" and snippet has class="result__snippet"
+                # We can match result blocks first, then extract link and snippet from each block
+                result_blocks = re.findall(r'<div\b(?=[^>]*?\bclass=["\'][^"\']*?\bresult\b)[^>]*>.*?</div>\s*(?=<div\b(?=[^>]*?\bclass=["\'][^"\']*?\bresult\b)|$)', text, re.S)
+                if not result_blocks:
+                    # Fallback to broad table or div result blocks if structure varies
+                    result_blocks = re.findall(r'<div\b[^>]*?\bclass=["\'][^"\']*?result[^"\']*?["\'][^>]*>.*?</div>', text, re.S)
+
+                for block in result_blocks:
+                    link_match = re.search(
+                        r'<a\b(?=[^>]*?\bclass=["\'][^"\']*?\bresult__a\b[^"\']*?["\'])(?=[^>]*?\bhref=["\']([^"\']+)["\'])[^>]*>(.*?)</a>',
+                        block,
+                        re.S,
+                    )
+                    if not link_match:
+                        continue
+                    url, title = link_match.group(1), link_match.group(2)
                     u = _unwrap(url)
                     if not u.startswith("http"):
                         continue
-                    sn = _strip_tags(snippets[i]) if i < len(snippets) else ""
+                    sn_match = re.search(r'class=["\'][^"\']*?\bresult__snippet\b[^"\']*?["\'][^>]*>(.*?)</a>', block, re.S)
+                    sn = _strip_tags(sn_match.group(1)) if sn_match else ""
                     results.append({"title": _strip_tags(title) or u, "url": u, "snippet": sn})
+
+                # Fallback if no blocks found via container regex
+                if not results:
+                    links = re.findall(
+                        r'<a\b(?=[^>]*?\bclass=["\'][^"\']*?\bresult__a\b[^"\']*?["\'])(?=[^>]*?\bhref=["\']([^"\']+)["\'])[^>]*>(.*?)</a>',
+                        text,
+                        re.S,
+                    )
+                    snippets = re.findall(r'class=["\'][^"\']*?\bresult__snippet\b[^"\']*?["\'][^>]*>(.*?)</a>', text, re.S)
+                    for i, (url, title) in enumerate(links):
+                        u = _unwrap(url)
+                        if not u.startswith("http"):
+                            continue
+                        sn = _strip_tags(snippets[i]) if i < len(snippets) else ""
+                        results.append({"title": _strip_tags(title) or u, "url": u, "snippet": sn})
+
             if results:
                 seen: set[str] = set()
                 out = []
@@ -63,7 +107,8 @@ def duck_search(query: str, n: int = 5) -> list[dict]:
 
 def wikipedia_search(query: str, lang: str = "ar", n: int = 3) -> list[dict]:
     """ويكيبيديا عربي/إنجليزي — مجاني بدون مفاتيح."""
-    import httpx
+    if not query or not isinstance(query, str) or httpx is None:
+        return []
     try:
         r = httpx.get(f"https://{lang}.wikipedia.org/w/api.php",
                       params={"action": "query", "list": "search", "srsearch": query,
@@ -84,6 +129,8 @@ def wikipedia_search(query: str, lang: str = "ar", n: int = 3) -> list[dict]:
 
 def web_search_all(query: str, lang: str = "ar", n: int = 5) -> list[dict]:
     """ويب + ويكيبيديا + أبحاث + سوشيال ميديا حسب طبيعة السؤال — مجاني وبدون مفاتيح."""
+    if not query or not isinstance(query, str):
+        return []
     ql = query.lower()
     results: list[dict] = []
     try:
@@ -118,6 +165,6 @@ def web_search_all(query: str, lang: str = "ar", n: int = 5) -> list[dict]:
             continue
         seen.add(u)
         out.append(r)
-        if len(out) >= n + 5:
+        if len(out) >= n:
             break
     return out

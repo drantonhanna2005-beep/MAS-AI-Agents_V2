@@ -130,7 +130,7 @@ def _gemini_stream(model: str, messages: list[dict], temperature: float,
                 if j.get("error"):
                     raise LLMError(_friendly_error("Gemini", j["error"].get("code"), json.dumps(j["error"], ensure_ascii=False)))
                 for c in (j.get("candidates") or []):
-                    for p in (c.get("content") or {}).get("parts", []):
+                    for p in ((c.get("content") or {}).get("parts") or []):
                         t = p.get("text", "")
                         if not t:
                             continue
@@ -152,12 +152,12 @@ def _openai_stream(provider: str, api_key: str, model: str, messages: list[dict]
     if provider == "openrouter":
         headers["HTTP-Referer"] = "http://localhost:8765"
         headers["X-Title"] = "University AI MAS"
-    msgs = messages
+    msgs = [dict(m) for m in messages]
     if images:  # صور بصيغة data URL تُمرر كما هي
-        msgs = [dict(m) for m in messages]
         last_user = next((i for i in range(len(msgs) - 1, -1, -1) if msgs[i].get("role") == "user"), None)
         if last_user is not None:
             text = msgs[last_user].get("content", "")
+            msgs[last_user] = dict(msgs[last_user])
             msgs[last_user]["content"] = [
                 {"type": "text", "text": text},
                 *[{"type": "image_url", "image_url": {"url": u}} for u in images],
@@ -306,14 +306,10 @@ def openrouter_tts(text: str, model: str, voice: str, api_key: str) -> bytes:
     return r.content
 
 
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-
 def gemini_transcribe(data: bytes, mime: str, api_key: str, model: str = "gemini-flash-lite-latest") -> str:
     """تحويل صوت → نص عبر Gemini (يفهم الصوت مباشرة بدقة عالية للعربية). يرفع LLMError عند الفشل."""
     if not api_key:
         raise LLMError("تحويل الصوت يحتاج مفتاح Gemini أو Groq مجاني في ⚙️ الإعدادات.")
-    import base64
     payload = {
         "contents": [{
             "parts": [
@@ -331,11 +327,12 @@ def gemini_transcribe(data: bytes, mime: str, api_key: str, model: str = "gemini
         raise LLMError(f"تعذر الاتصال بخدمة Gemini للصوت: {e}") from e
     if r.status_code != 200:
         raise LLMError(_friendly_error("Gemini STT", r.status_code, r.text))
-    try:
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts).strip()
-    except Exception as e:
-        raise LLMError(f"رد غير متوقع من Gemini: {e}") from e
+    candidates = r.json().get("candidates") or []
+    if not candidates:
+        prompt_feedback = r.json().get("promptFeedback")
+        raise LLMError(f"لم يرجع Gemini أي نص: {prompt_feedback or 'محتوى محجوب'}")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts).strip()
 
 
 def gemini_extract_document(data: bytes, mime: str, api_key: str,

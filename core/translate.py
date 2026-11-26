@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import html
+import threading
 import httpx
 
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
@@ -16,6 +18,7 @@ _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 _LANG_NAMES = {"en": "English", "ar": "العربية الفصحى الواضحة"}
 _SUPPORTED = ("ar", "en")
 _QCACHE: dict = {}
+_QCACHE_LOCK = threading.Lock()
 
 
 def _split(text: str, size: int = 1800) -> list[str]:
@@ -30,7 +33,7 @@ def _split(text: str, size: int = 1800) -> list[str]:
             cur = ""
         while len(para) > size:  # فقرة عملاقة → تقطيع قسري على حدود كلمات
             cut = para.rfind(" ", 0, size)
-            cut = cut if cut > size // 2 else size
+            cut = cut if cut >= size // 2 else size
             parts.append(para[:cut])
             para = para[cut:].lstrip()
         cur = para
@@ -44,10 +47,10 @@ def llm_translate(text: str, target: str, cfg: dict, prov: dict) -> str | None:
     if prov.get("provider") == "offline":
         return None
     from core.llm import complete
-    model = cfg["main_models"].get(prov["provider"]) or prov["model"]
+    model = prov.get("model") or (cfg.get("main_models") or {}).get(prov.get("provider", ""))
     from core.config import get_model_key
     system = (
-        f"You are a professional translator. Translate the user's text into {_LANG_NAMES[target]} "
+        f"You are a professional translator. Translate the user's text into {_LANG_NAMES.get(target, target)} "
         "with expert accuracy. STRICT RULES: keep Markdown formatting, tables, code blocks, URLs, "
         "and citation markers like [S1] or [W1] exactly as they are (never translate the markers). "
         "Do not add any explanation, notes, or the original text — output ONLY the translation."
@@ -71,7 +74,7 @@ def google_translate(text: str, target: str) -> str:
     """محرك جوجل المجاني (بدون مفتاح) — بمحاولتين عند 429 العابر."""
     import time
     out: list[str] = []
-    for part in _split(text):
+    for part in _split(text, size=600):
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
@@ -82,7 +85,8 @@ def google_translate(text: str, target: str) -> str:
                 )
                 r.raise_for_status()
                 data = r.json()
-                seg = "".join((s[0] or "") for s in (data[0] or []) if s and s[0])
+                sentences = data[0] if isinstance(data, list) and data else []
+                seg = "".join((s[0] or "") for s in sentences if isinstance(s, list) and s and s[0])
                 if not seg.strip():
                     raise ValueError("empty translation segment")
                 out.append(seg)
@@ -94,7 +98,7 @@ def google_translate(text: str, target: str) -> str:
                     time.sleep(1.2)
         if last_exc:
             raise last_exc
-    return "\n".join(out)
+    return "\n\n".join(out)
 
 
 def mymemory_translate(text: str, target: str) -> str:
@@ -111,6 +115,7 @@ def mymemory_translate(text: str, target: str) -> str:
         data = r.json()
         status = str(data.get("responseStatus", ""))
         txt = (data.get("responseData") or {}).get("translatedText") or ""
+        txt = html.unescape(txt)
         if status not in ("200", "200.0") or not txt.strip():
             raise ValueError(str(data.get("responseDetails") or "empty result"))
         out.append(txt)
@@ -122,9 +127,10 @@ def quick_translate(text: str, target: str) -> str | None:
     text = (text or "").strip()
     if not text or target not in _SUPPORTED:
         return None
-    ck = (target, text[:400])
-    if ck in _QCACHE:
-        return _QCACHE[ck]
+    ck = (target, text)
+    with _QCACHE_LOCK:
+        if ck in _QCACHE:
+            return _QCACHE[ck]
     out = None
     try:
         out = google_translate(text, target)
@@ -134,9 +140,10 @@ def quick_translate(text: str, target: str) -> str | None:
         except Exception:
             out = None
     if out:
-        if len(_QCACHE) > 200:
-            _QCACHE.clear()
-        _QCACHE[ck] = out
+        with _QCACHE_LOCK:
+            if len(_QCACHE) > 200:
+                _QCACHE.clear()
+            _QCACHE[ck] = out
     return out
 
 
@@ -163,7 +170,7 @@ def translate(text: str, target: str, cfg: dict | None = None, prov: dict | None
     if gk:
         try:
             from core.llm import complete
-            gm = (cfg.get("stt") or {}).get("gemini_model") or "gemini-flash-lite-latest"
+            gm = (cfg.get("main_models") or {}).get("gemini") or "gemini-2.0-flash"
             sys_p = (f"You are a professional translator. Translate the user's text into {_LANG_NAMES[target]} "
                      "with expert accuracy. Keep Markdown formatting, tables, URLs, and [S1]/[W1] markers "
                      "exactly as they are. Output ONLY the translation.")
