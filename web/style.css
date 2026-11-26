@@ -698,9 +698,44 @@ html[data-theme="light"] .msg .body pre.cb-pre{background:#0f1726;color:#e2e8f0}
 .modal-body .grid2 { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
 .msg .body img { max-width: 100%; height: auto; }
 /* أشرطة تمرير واضحة في الاتجاهين داخل منطقة الشات */
-#chatScroll::-webkit-scrollbar:horizontal { height: 11px; }
-#chatScroll::-webkit-scrollbar-thumb:horizontal { background: var(--line2); border-radius: 6px; }
-#chatScroll::-webkit-scrollbar-thumb:horizontal:hover { background: var(--txt3); }
+/* The compact bottom rail is the visible horizontal navigator. Keep the primary
+   scrollport's own horizontal track out of the way to avoid competing bars. */
+#chatScroll::-webkit-scrollbar:horizontal { height: 0; }
+#chatScroll { scrollbar-width: thin; }
+
+.chat-horizontal-rail {
+  flex: 0 0 9px;
+  min-width: 0;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--txt3) 58%, transparent) transparent;
+  background: transparent;
+  opacity: .72;
+  transition: opacity .16s ease, flex-basis .16s ease;
+  cursor: ew-resize;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+.chat-horizontal-rail:hover,
+.chat-horizontal-rail:focus-visible { opacity: 1; }
+.chat-horizontal-rail:focus-visible { outline: 1px solid color-mix(in srgb, var(--accent) 65%, transparent); outline-offset: -1px; }
+.chat-horizontal-rail::-webkit-scrollbar { height: 6px; }
+.chat-horizontal-rail::-webkit-scrollbar-track { background: transparent; }
+.chat-horizontal-rail::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--txt3) 58%, transparent);
+}
+.chat-horizontal-rail:hover::-webkit-scrollbar-thumb,
+.chat-horizontal-rail:focus-visible::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 68%, var(--txt3));
+}
+#chatHorizontalSpacer { height: 1px; pointer-events: none; }
+.chat-horizontal-inner { height: 1px; }
+.chat-horizontal-rail[hidden] { display: none; }
 
 /* طبقة إفلات الملفات — تظهر عند سحب أي ملف من أي نوع فوق أي مكان في الصفحة */
 #dropOverlay { position: fixed; inset: 0; z-index: 400; pointer-events: none;

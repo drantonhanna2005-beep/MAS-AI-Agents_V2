@@ -1,10 +1,10 @@
 ﻿/* MAS AI Agents â€” service worker (app shell only; never caches API or user data). */
-const VERSION = "mas-v4";
+const VERSION = "mas-v15";
 const SHELL = [
   "/",
-  "/static/style.css?v=14",
-  "/static/i18n.js?v=14",
-  "/static/app.js?v=14",
+  "/static/style.css?v=25",
+  "/static/i18n.js?v=25",
+  "/static/app.js?v=25",
   "/static/manifest.json",
   "/static/assets/fav/icon-192.png",
   "/static/assets/fav/icon-512.png",
